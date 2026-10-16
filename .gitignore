@@ -6,3 +6,6 @@ venv/
 *.egg-info/
 .pytest_cache/
 .DS_Store
+
+# local dev database (binaries + logs), never committed
+.falkordb/
