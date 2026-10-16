@@ -113,10 +113,14 @@ def repo_stats(g: ReadOnlyGraph, repo: str) -> Dict[str, Any]:
     out["n_commits"] = rows[0][0] if rows else 0
     rows = _rows(
         g,
-        ""
-        "MATCH (r:Repository {name: $repo})<-[:IN_REPO]-(a)-[e]->(b) "
-        "RETURN type(e) AS kind, count(e) AS c",
-        {"repo": repo},
+        "MATCH (p:Person) RETURN count(p) AS c",
+        {},
+    )
+    out["n_person"] = rows[0][0] if rows else 0
+    rows = _rows(
+        g,
+        "MATCH ()-[e]->() RETURN type(e) AS kind, count(e) AS c",
+        {},
     )
     out["edges"] = {r[0]: r[1] for r in rows}
     out["n_edges"] = sum(out["edges"].values())
@@ -136,7 +140,7 @@ def time_slice(g: ReadOnlyGraph, repo: str, t: int) -> Dict[str, Any]:
     """
     cypher = f"""
 MATCH (r:Repository {{name: $repo}})<-[:IN_REPO]-(m:Module)
-WHERE {_win("m")}
+WHERE {_win("m")} AND m.external IS NULL
 OPTIONAL MATCH (m)-[d:DEFINES]->(f)
 WHERE {_win("d")} AND f:Function AND {_win("f")}
 WITH m, count(DISTINCT f.id) AS direct

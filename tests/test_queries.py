@@ -190,6 +190,7 @@ def test_db_config_accepts_cloud_env_spellings(tmp_path, monkeypatch):
                    "FALKORDB_USERNAME=falkordb\n"
                    "FALKORDB_PASS=topsecret\n")
     monkeypatch.delenv("FALKORDB_HOST", raising=False)
+    monkeypatch.delenv("FALKORDB_LOCAL", raising=False)  # else .env is skipped
     cfg = D.get_config(dotenv_path=str(env))
     assert cfg.host == "cloud.example"
     assert cfg.port == 64621

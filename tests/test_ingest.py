@@ -333,3 +333,61 @@ def test_modified_node_repoints_incident_edges():
     live = [u for u, (vf, vt) in windows.items()
             if vf <= e3 and (vt is None or vt > e3)]
     assert live == [new_uid], windows
+
+
+def test_imports_edge_resolves_relative_import():
+    # from ._emoji_codes import ... inside rich/emoji.py
+    ops = plan_ingest("demo", [_snap(
+        "c1", T1, [_mod("rich/emoji.py"), _mod("rich/_emoji_codes.py")],
+        [_import_edge("rich/emoji.py", "._emoji_codes")])])
+    imp = [o for o in ops if o["op"] == "edge_open"
+           and o["kind"] == "IMPORTS"]
+    assert len(imp) == 1
+    assert imp[0]["to_id"] == "module:demo:rich/_emoji_codes.py"
+    stubs = [o for o in ops if o["op"] == "node_open"
+             and "$ext:" in o["id"]]
+    assert stubs == []
+
+
+def test_imports_edge_skips_degenerate_relative_alias():
+    # `from . import x` with an unresolvable alias: no stub, no edge
+    ops = plan_ingest("demo", [_snap(
+        "c1", T1, [_mod("a.py")],
+        [_import_edge("a.py", ".")])])
+    imp = [o for o in ops if o["op"] == "edge_open"
+           and o["kind"] == "IMPORTS"]
+    assert imp == []
+    stubs = [o for o in ops if o["op"] == "node_open"
+             and "$ext:" in o["id"]]
+    assert stubs == []
+
+
+def test_rename_rejects_cross_file_same_name():
+    # identically-named test helpers are not renames of each other when
+    # both files persist across the transition (neither file moved)
+    ma, mb = _mod("tests/test_a.py"), _mod("tests/test_b.py")
+    n1 = _func("tests/test_a.py", "test_render")
+    n2 = _func("tests/test_b.py", "test_render")
+    ops = plan_ingest("demo", [
+        _snap("c1", T1, [ma, mb, n1], []),
+        _snap("c2", T2, [ma, mb, n2], []),
+    ])
+    ren = [o for o in ops if o["op"] == "edge_open"
+           and o["kind"] == "RENAMED_TO"]
+    assert ren == []
+
+
+def test_rename_accepts_function_in_moved_file():
+    # the whole file moved test_a.py -> test_b.py: the function follows
+    ma, mb = _mod("tests/test_a.py"), _mod("tests/test_b.py")
+    n1 = _func("tests/test_a.py", "test_render")
+    n2 = _func("tests/test_b.py", "test_render")
+    ops = plan_ingest("demo", [
+        _snap("c1", T1, [ma, n1], []),
+        _snap("c2", T2, [mb, n2], []),
+    ])
+    ren = [o for o in ops if o["op"] == "edge_open"
+           and o["kind"] == "RENAMED_TO"]
+    assert len(ren) == 1
+    assert ren[0]["from_id"] == "func:demo:tests/test_a.py:test_render"
+    assert ren[0]["to_id"] == "func:demo:tests/test_b.py:test_render"

@@ -97,8 +97,8 @@ function apiDown() {
 /* ---------- top bar ---------- */
 function renderStats(stats) {
   repoName.textContent = stats.repo || "—";
-  commitCount.textContent = (stats.commits == null ? "—" : stats.commits) + " commits";
-  var ok = stats.db === "ok";
+  commitCount.textContent = (stats.n_commits == null ? "—" : stats.n_commits) + " commits";
+  var ok = stats.connected === true;
   dbDot.className = "dot " + (ok ? "ok" : "down");
   dbLabel.textContent = "FalkorDB: " + (ok ? "connected" : "down");
 }
@@ -107,8 +107,13 @@ function renderStats(stats) {
 function renderScrubberLabel() {
   var c = timeline[currentIndex];
   if (!c) { return; }
-  stateLabel.textContent = fmtDate(c.timestamp);
-  stateMeta.textContent = shortSha(c.commit) + "  ·  " + authorShort(c.author);
+  stateLabel.textContent = fmtDate(c.timestamp && c.timestamp.iso);
+  stateMeta.textContent = (c.short || shortSha(c.commit)) + "  ·  " + authorShort(c.author);
+}
+
+function fmtEpoch(epoch) {
+  if (epoch == null) { return "—"; }
+  return fmtDate(new Date(Number(epoch) * 1000).toISOString());
 }
 
 async function fetchTimeline() {
@@ -117,7 +122,7 @@ async function fetchTimeline() {
   hide(stateLoading);
   if (!res.ok) { throw new Error("timeline " + res.status); }
   var data = await res.json();
-  timeline = data.commits || [];
+  timeline = data.entries || [];
   if (!timeline.length) { throw new Error("timeline empty"); }
   scrubber.max = String(timeline.length - 1);
   scrubber.value = String(timeline.length - 1);
@@ -134,14 +139,15 @@ async function fetchState(idx) {
   show(treeLoading);
   moduleTree.innerHTML = "";
   try {
-    var res = await fetch(API + "/api/state?t=" + encodeURIComponent(c.epoch));
+    var res = await fetch(API + "/api/state?t=" + encodeURIComponent(c.timestamp.epoch));
     if (!res.ok) { throw new Error("state " + res.status); }
     var data = await res.json();
     if (my !== inflight) { return; } // dropped: a newer scrub already won
     currentState = data;
     renderModules(data);
-    if (data.modules && data.modules.length && !selectedModule) {
-      selectModule(data.modules[0].id, data.modules[0].name);
+    var mods = (data.slice && data.slice.modules) || [];
+    if (mods.length && !selectedModule) {
+      selectModule(mods[0].id, mods[0].name);
     }
   } finally {
     if (my === inflight) { hide(treeLoading); }
@@ -149,10 +155,12 @@ async function fetchState(idx) {
 }
 
 function renderModules(data) {
+  var slice = data.slice || {};
+  var stats = data.stats || {};
   stateSummary.textContent =
-    (data.total_functions == null ? "—" : data.total_functions) + " functions · " +
-    (data.total_edges == null ? "—" : data.total_edges) + " edges";
-  var mods = data.modules || [];
+    (slice.total_functions == null ? "—" : slice.total_functions) + " functions · " +
+    (stats.n_edges == null ? "—" : stats.n_edges) + " edges";
+  var mods = slice.modules || [];
   moduleTree.innerHTML = mods.map(function (m) {
     var sel = selectedModule && selectedModule.id === m.id;
     return '<li>' +
@@ -166,7 +174,7 @@ function renderModules(data) {
       "</button>" +
       '<div class="module-detail" hidden>' +
         '<span class="mono">' + esc(m.id) + "</span>" +
-        "<span> · " + esc(m.n_functions) + " functions at " + esc(fmtDate(data.t)) + "</span>" +
+        "<span> · " + esc(m.n_functions) + " functions at " + esc(fmtEpoch(data.t)) + "</span>" +
       "</div>" +
     "</li>";
   }).join("");
@@ -204,7 +212,7 @@ async function runQuery(question) {
     var res = await fetch(API + "/api/query", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question: question, t: c ? c.epoch : null })
+      body: JSON.stringify({ question: question, t: c && c.timestamp ? c.timestamp.epoch : null })
     });
     if (!res.ok) { throw new Error("query " + res.status); }
     var data = await res.json();
@@ -232,7 +240,7 @@ function renderVerdict(data, question) {
   verdictMeta.textContent =
     (meta.repo ? meta.repo + "  ·  " : "") +
     (meta.target_id ? meta.target_id + "  ·  " : "") +
-    (meta.t ? fmtDate(meta.t) : "");
+    (meta.t != null ? fmtEpoch(meta.t) : "");
   show(verdictCard);
   // money-shot transition: visible update each time the verdict re-renders
   verdictCard.classList.remove("flash");

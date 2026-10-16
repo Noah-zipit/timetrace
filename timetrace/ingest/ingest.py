@@ -126,6 +126,30 @@ def similarity(a: dict, b: dict) -> float:
     return len(fa & fb) / len(fa | fb)
 
 
+def _module_path(node_id: str) -> str:
+    """'func:rich:rich/console.py:Console.print' -> 'rich/console.py'."""
+    parts = node_id.split(":", 2)
+    if len(parts) < 3:
+        return ""
+    rest = parts[2]
+    # module ids have no qualname suffix; function/class ids do
+    return rest.rsplit(":", 1)[0] if parts[0] in ("func", "class") else rest
+
+
+def _plausible_move(old_id: str, new_id: str) -> bool:
+    """A rename is plausible only when the file stayed in the same
+    directory (refactor/split) or kept its filename (directory move).
+    This kills the classic false positive of identically-named test
+    helpers in unrelated files matching on qualname + features."""
+    import posixpath
+
+    old_p, new_p = _module_path(old_id), _module_path(new_id)
+    if not old_p or not new_p or old_p == new_p:
+        return False
+    return (posixpath.dirname(old_p) == posixpath.dirname(new_p)
+            or posixpath.basename(old_p) == posixpath.basename(new_p))
+
+
 def _edge_key(kind: str, frm: str, to: str, callee: str = "") -> tuple:
     if kind == "calls":
         return ("calls", frm, callee or "")
@@ -194,16 +218,42 @@ def plan_ingest(repo: str, snapshots: list[dict]) -> list[dict]:
             label, nid = rekey_node_id(n["id"], repo)
             cur[nid] = {**n, "_nid": nid, "_label": label}
         def _resolve_import(alias: str) -> str | None:
-            """Dotted import alias -> real in-repo module id, or None.
+            """Import alias -> real in-repo module id, or None.
 
-            Resolution order: "<a/b>.py", then "<a/b>/__init__.py",
-            against this snapshot's module node ids.
+            Handles absolute dotted names ("rich.console"), plain basenames
+            ("console"), and relative imports (".console", "..utils") by
+            matching against every module's full dotted path and its
+            basename. Basename matches only count when unambiguous.
             """
-            stem = alias.replace(".", "/")
-            for candidate in (stem + ".py", stem + "/__init__.py"):
-                mid = f"module:{repo}:{candidate}"
-                if mid in cur:
-                    return mid
+            base = alias.lstrip(".")
+            if not base:
+                return None
+            dotted_hits: list[str] = []
+            base_hits: list[str] = []
+            for nid in cur:
+                if not nid.startswith("module:"):
+                    continue
+                path = nid.split(":", 2)[2]
+                if path.startswith("$ext:"):
+                    continue
+                stem = path[:-3] if path.endswith(".py") else path
+                if stem.endswith("/__init__"):
+                    stem = stem[: -len("/__init__")]  # pkg/__init__ == pkg
+                full = stem.replace("/", ".")
+                name = stem.rsplit("/", 1)[-1]
+                base_norm = base.lstrip("_")
+                if full == base or full.endswith("." + base):
+                    dotted_hits.append(nid)
+                elif (name == base or name == base.replace(".", "_")
+                        or name.lstrip("_") == base_norm):
+                    # last clause: the parser sometimes drops a leading
+                    # underscore from relative aliases (".pretty" for
+                    # "_pretty.py") — match underscore-insensitively
+                    base_hits.append(nid)
+            if dotted_hits:
+                return dotted_hits[0]
+            if len(base_hits) == 1:
+                return base_hits[0]
             return None
 
         ext_ids: dict[str, dict] = {}
@@ -211,6 +261,9 @@ def plan_ingest(repo: str, snapshots: list[dict]) -> list[dict]:
             if e["kind"] == "imports":
                 raw_to = e["to"]  # 'module:<alias.name>'
                 alias = _rest(raw_to)
+                if not alias or alias == ".":
+                    continue  # relative-import noise the parser cannot
+                    # resolve to a dotted name — no stub, no edge
                 if _resolve_import(alias) is not None:
                     continue  # edge targets the real module; no stub needed
                 eid = f"module:{repo}:$ext:{alias}"
@@ -246,6 +299,19 @@ def plan_ingest(repo: str, snapshots: list[dict]) -> list[dict]:
         # renames: old_id -> (new_id, similarity)
         renames: dict[str, tuple[str, float]] = {}
         if deleted and created:
+            # corroboration sets: files that genuinely appeared/vanished
+            # this transition (reopened nodes excluded — a hash change is
+            # not a new file; external stubs excluded)
+            def _mod_path_of(nid: str) -> str:
+                p = nid.split(":", 2)
+                return p[2] if len(p) == 3 else ""
+
+            deleted_mods = {_mod_path_of(i) for i in deleted
+                            if i.startswith("module:")}
+            created_mods = {_mod_path_of(i) for i, n in created.items()
+                            if n.get("_label") == "Module"
+                            and i not in reopened
+                            and not n.get("_external")}
             taken: set[str] = set()
             for old_id, dold in list(deleted.items()):
                 best: tuple[str, float] | None = None
@@ -256,6 +322,17 @@ def plan_ingest(repo: str, snapshots: list[dict]) -> list[dict]:
                         continue
                     if dold["qualname"] != qualname_of(n):
                         continue  # the doc's rule: same qualname
+                    if not _plausible_move(old_id, new_id):
+                        continue  # kill the classic false positive:
+                        # identically-named test helpers in unrelated files
+                        # are not renames of each other
+                    op, np = _module_path(old_id), _module_path(new_id)
+                    if (dold["label"] in ("Function", "Class")
+                            and op != np
+                            and op not in deleted_mods
+                            and np not in created_mods):
+                        continue  # the function "moved" but neither file
+                        # did — coincidence, not a rename
                     sim = similarity(dold["fields"], n)
                     if (sim >= RENAME_SIMILARITY_THRESHOLD
                             and (best is None or sim > best[1])):
@@ -378,6 +455,8 @@ def plan_ingest(repo: str, snapshots: list[dict]) -> list[dict]:
                                   "props": {"callee": e.get("callee", "")}}
             elif kind == "imports":
                 alias = _rest(e["to"])
+                if not alias or alias == ".":
+                    continue  # relative-import noise — no stub, no edge
                 to = (_resolve_import(alias)
                       or f"module:{repo}:$ext:{alias}")
                 key = _edge_key(kind, frm, to)
