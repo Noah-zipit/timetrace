@@ -9,52 +9,63 @@
 <body>
   <header class="topbar">
     <div class="brand">timetrace</div>
-    <nav class="tabs" role="tablist" aria-label="Views">
-      <button class="tab active" data-view="view-timeline" role="tab" aria-selected="true" aria-controls="view-timeline" id="tab-timeline">Timeline</button>
-      <button class="tab" data-view="view-ask" role="tab" aria-selected="false" aria-controls="view-ask" id="tab-ask">Ask</button>
-      <button class="tab" data-view="view-proof" role="tab" aria-selected="false" aria-controls="view-proof" id="tab-proof">Proof</button>
-    </nav>
+    <div class="repo-meta">
+      <span id="repo-name" class="repo-name mono">—</span>
+      <span class="sep" aria-hidden="true">·</span>
+      <span id="commit-count">— commits</span>
+    </div>
+    <div class="db-status" role="status" aria-live="polite">
+      <span id="db-dot" class="dot unknown" aria-hidden="true"></span>
+      <span id="db-label">FalkorDB: connecting…</span>
+    </div>
   </header>
 
-  <main>
-    <!-- TIMELINE VIEW -->
-    <section id="view-timeline" class="view active" role="tabpanel" aria-labelledby="tab-timeline">
-      <h1>Timeline</h1>
-      <p class="hint">Drag the scrubber to move through the repo's recorded states. This is a mock shell — data is local and static until event week.</p>
-      <div class="scrub-row">
-        <input type="range" id="scrubber" min="0" max="0" value="0" step="1" aria-label="Timeline scrubber">
-        <div id="state-label" class="state-label">state at —</div>
-      </div>
-      <div id="state-meta" class="state-meta"></div>
-      <div class="columns">
-        <div class="col">
-          <h2>Nodes</h2>
-          <ul id="node-list" class="tree"></ul>
-        </div>
-        <div class="col">
-          <h2>Edges</h2>
-          <ul id="edge-list" class="tree"></ul>
-        </div>
-      </div>
+  <div id="api-error" class="api-error" hidden role="alert">
+    Cannot reach timetrace API / FalkorDB — see README local setup.
+  </div>
+
+  <main class="layout">
+    <!-- LEFT: timeline scrubber -->
+    <section class="panel timeline-panel" aria-labelledby="timeline-heading">
+      <h2 id="timeline-heading">Timeline</h2>
+      <p class="hint">Scrub through recorded commits. Code state and verdict re-run at the scrubbed time.</p>
+      <label for="scrubber" class="sr-only">Timeline scrubber</label>
+      <input type="range" id="scrubber" min="0" max="0" value="0" step="1" disabled>
+      <div id="state-label" class="state-label">—</div>
+      <div id="state-meta" class="state-meta mono">—</div>
+      <div id="state-loading" class="loading" hidden>Loading commits…</div>
     </section>
 
-    <!-- ASK VIEW -->
-    <section id="view-ask" class="view" role="tabpanel" aria-labelledby="tab-ask" hidden>
-      <h1>Ask</h1>
-      <p class="hint">Ask about the code's history. Mock answers only — the real agent answers during event week.</p>
+    <!-- CENTER: code state -->
+    <section class="panel state-panel" aria-labelledby="state-heading">
+      <h2 id="state-heading">Code state</h2>
+      <p class="hint">Modules at the scrubbed time. Select one as the question target.</p>
+      <div id="state-summary" class="state-summary mono">—</div>
+      <div id="tree-loading" class="loading" hidden>Loading code state…</div>
+      <ul id="module-tree" class="tree"></ul>
+    </section>
+
+    <!-- RIGHT: ask -->
+    <section class="panel ask-panel" aria-labelledby="ask-heading">
+      <h2 id="ask-heading">Ask</h2>
       <form id="ask-form" class="ask-form">
         <label for="ask-input">Question</label>
-        <input type="text" id="ask-input" placeholder='e.g. "is it safe to change auth.py today?"' autocomplete="off">
-        <button type="submit" id="ask-button">Ask</button>
+        <div class="ask-row">
+          <input type="text" id="ask-input" autocomplete="off"
+                 placeholder="Select a module in the code state, then ask…">
+          <button type="submit" id="ask-button">Ask</button>
+        </div>
       </form>
-      <div id="answer-card" class="answer-card" hidden></div>
-    </section>
-
-    <!-- PROOF VIEW -->
-    <section id="view-proof" class="view" role="tabpanel" aria-labelledby="tab-proof" hidden>
-      <h1>Proof</h1>
-      <p class="hint">The reasoning chain behind the current answer. Each step carries its evidence and source.</p>
-      <ol id="chain-list" class="chain"></ol>
+      <div id="ask-loading" class="loading" hidden>Asking the graph…</div>
+      <div id="verdict-card" class="verdict-card" hidden>
+        <div id="verdict-badge" class="verdict-badge">—</div>
+        <p id="verdict-summary" class="verdict-summary"></p>
+        <h3>Proof chain</h3>
+        <ol id="proof-chain" class="chain"></ol>
+        <p class="no-reads">every fact from graph queries — no file reads</p>
+        <div id="queries-run" class="queries mono"></div>
+        <div id="verdict-meta" class="verdict-meta mono"></div>
+      </div>
     </section>
   </main>
 

@@ -202,15 +202,20 @@ def answer(question: str, t: Optional[int] = None,
 
     blast = Q.blast_radius(g, repo, target_id, now_t)
     queries_run.append("blast_radius")
-    ch = Q.churn(g, repo, target_id, since_days=90)
+    # Full-life churn: the 30/90-day windows are derived in Python so the
+    # proof chain can always cite the target's real first/last commits.
+    ch = Q.churn(g, repo, target_id, since_days=0)
     queries_run.append("churn")
     own = Q.owners(g, repo, target_id)
     queries_run.append("owners")
 
     totals = blast["totals"]
     month_ago = now_t - 30 * 86400
+    quarter_ago = now_t - 90 * 86400
     recent = [c for c in ch["changes"]
               if c["ts"] and month_ago <= c["ts"] <= now_t]
+    last90 = [c for c in ch["changes"]
+              if c["ts"] and quarter_ago <= c["ts"] <= now_t]
     score = risk_score(totals["live_dependents"], totals["importing_modules"],
                        len(recent), len(own))
     verdict = verdict_tier(score)
@@ -298,7 +303,7 @@ def answer(question: str, t: Optional[int] = None,
             "title": "Churn and ownership",
             "evidence": (
                 f"No changes in the 30 days before the as-of time "
-                f"({ch['n_changes']} in the last 90). Top owners: "
+                f"({len(last90)} in the last 90, {len(ch['changes'])} total). Top owners: "
                 + (", ".join(f"{o['name'] or o['email']} ({o['touches']})"
                              for o in own[:3]) or "none recorded")),
             "source": (_commit_source(ch["changes"][-1])

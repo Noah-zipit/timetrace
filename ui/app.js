@@ -1,195 +1,276 @@
-/* timetrace UI shell — functional foundation only.
-   MOCK DATA: everything rendered on this page comes from the MOCK_*
-   constants below. Do not call the real API stubs (they return 501).
-   Event week replaces these constants with real fetch() calls. */
+/* timetrace UI — live build, no mock data.
+   Every number, label, and verdict rendered here comes from the timetrace
+   API (FalkorDB-backed). If the API is unreachable, the page shows an
+   honest error and renders nothing fabricated.
+
+   Contract:
+     GET  /api/stats             -> repo name, commit count, db status
+     GET  /api/timeline          -> commits[] {commit, author, timestamp, epoch, ...}
+     GET  /api/state?t=<epoch>   -> modules[] {id, name, n_functions}, totals
+     POST /api/query {question, t} -> {verdict, summary, proof_chain[], meta}
+*/
 
 "use strict";
 
-// TODO(event-week): replace with fetch('/api/timeline')
-const MOCK_TIMELINE = [
-  {
-    commit: "9f3a1c2",
-    author: "noah-zipit",
-    timestamp: "2026-10-01T09:12:00Z",
-    nodes: [
-      { id: "module:app/auth.py", kind: "module", name: "app/auth.py" },
-      { id: "class:app/auth.py:Authenticator", kind: "class", name: "Authenticator" },
-      { id: "func:app/auth.py:Authenticator.login", kind: "function", name: "Authenticator.login" },
-      { id: "func:app/auth.py:hash_password", kind: "function", name: "hash_password" }
-    ],
-    edges: [
-      { from: "module:app/auth.py", to: "class:app/auth.py:Authenticator", kind: "defines" },
-      { from: "class:app/auth.py:Authenticator", to: "func:app/auth.py:Authenticator.login", kind: "defines" },
-      { from: "func:app/auth.py:Authenticator.login", to: "func:app/auth.py:hash_password", kind: "calls", callee: "hash_password" }
-    ]
-  },
-  {
-    commit: "b7e40d9",
-    author: "noah-zipit",
-    timestamp: "2026-10-04T14:47:00Z",
-    nodes: [
-      { id: "module:app/auth.py", kind: "module", name: "app/auth.py" },
-      { id: "module:app/rate_limit.py", kind: "module", name: "app/rate_limit.py" },
-      { id: "class:app/auth.py:Authenticator", kind: "class", name: "Authenticator" },
-      { id: "func:app/auth.py:Authenticator.login", kind: "function", name: "Authenticator.login" },
-      { id: "func:app/auth.py:hash_password", kind: "function", name: "hash_password" },
-      { id: "func:app/rate_limit.py:check", kind: "function", name: "check" }
-    ],
-    edges: [
-      { from: "module:app/auth.py", to: "class:app/auth.py:Authenticator", kind: "defines" },
-      { from: "class:app/auth.py:Authenticator", to: "func:app/auth.py:Authenticator.login", kind: "defines" },
-      { from: "func:app/auth.py:Authenticator.login", to: "func:app/auth.py:hash_password", kind: "calls", callee: "hash_password" },
-      { from: "func:app/auth.py:Authenticator.login", to: "func:app/rate_limit.py:check", kind: "calls", callee: "check" },
-      { from: "module:app/auth.py", to: "module:app/rate_limit.py", kind: "imports", names: ["check"] }
-    ]
-  },
-  {
-    commit: "e58b213",
-    author: "noah-zipit",
-    timestamp: "2026-10-08T21:03:00Z",
-    nodes: [
-      { id: "module:app/auth.py", kind: "module", name: "app/auth.py" },
-      { id: "module:app/rate_limit.py", kind: "module", name: "app/rate_limit.py" },
-      { id: "class:app/auth.py:Authenticator", kind: "class", name: "Authenticator" },
-      { id: "func:app/auth.py:Authenticator.login", kind: "function", name: "Authenticator.login" },
-      { id: "func:app/auth.py:Authenticator.verify_token", kind: "function", name: "Authenticator.verify_token" },
-      { id: "func:app/rate_limit.py:check", kind: "function", name: "check" }
-    ],
-    edges: [
-      { from: "module:app/auth.py", to: "class:app/auth.py:Authenticator", kind: "defines" },
-      { from: "class:app/auth.py:Authenticator", to: "func:app/auth.py:Authenticator.login", kind: "defines" },
-      { from: "class:app/auth.py:Authenticator", to: "func:app/auth.py:Authenticator.verify_token", kind: "defines" },
-      { from: "func:app/auth.py:Authenticator.login", to: "func:app/rate_limit.py:check", kind: "calls", callee: "check" },
-      { from: "module:app/auth.py", to: "module:app/rate_limit.py", kind: "imports", names: ["check"] }
-    ]
-  }
-];
+var API = ""; // same origin: the API serves this UI at "/"
 
-// TODO(event-week): replace with fetch('/api/query', {method:'POST', ...})
-const MOCK_ANSWER = {
-  verdict: "Safe to change — with one condition.",
-  summary: "Changing app/auth.py today is low risk. The only live dependents are Authenticator.login and rate_limit.check; hash_password was removed in e58b213 and no callers reference it.",
-  proof_chain: [
-    { title: "login gained a rate_limit.check call", source: "commit b7e40d9" },
-    { title: "hash_password deleted — zero live callers", source: "commit e58b213" },
-    { title: "verify_token added, no external dependents yet", source: "commit e58b213" }
-  ]
-};
+/* ---------- dom ---------- */
+var $ = function (id) { return document.getElementById(id); };
 
-// TODO(event-week): replace with fetch('/api/query', {method:'POST', ...})
-const MOCK_CHAIN = [
-  {
-    title: "Locate the target module in the graph",
-    evidence: "app/auth.py exists in all 3 recorded snapshots; 6 nodes and 5 edges reference it at the latest state.",
-    source: "snapshot e58b213 · module:app/auth.py"
-  },
-  {
-    title: "Walk dependents backwards in time",
-    evidence: "Only Authenticator.login and rate_limit.check call into auth.py. login picked up the check call on 2026-10-04; nothing else touches the module since.",
-    source: "edge walk: calls → func:app/auth.py:Authenticator.login, func:app/rate_limit.py:check"
-  },
-  {
-    title: "Check for recently deleted callers",
-    evidence: "hash_password was deleted in e58b213. A stale import would break, but no snapshot since then imports it.",
-    source: "commit e58b213 · removed: func:app/auth.py:hash_password"
-  },
-  {
-    title: "Render verdict",
-    evidence: "Two live dependents, both touched within the last 5 days and covered by recent commits. Change is safe provided rate_limit.check keeps its signature.",
-    source: "aggregation over snapshots 9f3a1c2 → e58b213"
-  }
-];
+var repoName = $("repo-name");
+var commitCount = $("commit-count");
+var dbDot = $("db-dot");
+var dbLabel = $("db-label");
+var apiError = $("api-error");
+var scrubber = $("scrubber");
+var stateLabel = $("state-label");
+var stateMeta = $("state-meta");
+var stateLoading = $("state-loading");
+var stateSummary = $("state-summary");
+var treeLoading = $("tree-loading");
+var moduleTree = $("module-tree");
+var askForm = $("ask-form");
+var askInput = $("ask-input");
+var askButton = $("ask-button");
+var askLoading = $("ask-loading");
+var verdictCard = $("verdict-card");
+var verdictBadge = $("verdict-badge");
+var verdictSummary = $("verdict-summary");
+var proofChain = $("proof-chain");
+var queriesRun = $("queries-run");
+var verdictMeta = $("verdict-meta");
+
+/* ---------- state ---------- */
+var timeline = [];        // commits from /api/timeline, ascending
+var currentIndex = -1;    // scrubber position
+var currentState = null;  // last /api/state payload
+var selectedModule = null;// {id, name}
+var inflight = 0;         // request counter: stale responses are dropped
 
 /* ---------- helpers ---------- */
-
 function esc(s) {
-  return String(s).replace(/[&<>"']/g, function (c) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
     return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
   });
 }
 
-/* ---------- tab bar ---------- */
+function shortSha(sha) {
+  return String(sha || "").slice(0, 7);
+}
 
-var tabs = Array.prototype.slice.call(document.querySelectorAll(".tab"));
-tabs.forEach(function (tab) {
-  tab.addEventListener("click", function () {
-    tabs.forEach(function (t) {
-      var active = t === tab;
-      t.classList.toggle("active", active);
-      t.setAttribute("aria-selected", String(active));
-      document.getElementById(t.dataset.view).hidden = !active;
-      document.getElementById(t.dataset.view).classList.toggle("active", active);
+function fmtDate(iso) {
+  var d = new Date(iso);
+  if (isNaN(d.getTime())) { return "—"; }
+  var p = function (n) { return String(n).padStart(2, "0"); };
+  return d.getUTCFullYear() + "-" + p(d.getUTCMonth() + 1) + "-" + p(d.getUTCDate()) +
+    " " + p(d.getUTCHours()) + ":" + p(d.getUTCMinutes()) + " UTC";
+}
+
+function authorShort(author) {
+  var m = /^([^<]+?)\s*<[^>]*>$/.exec(String(author || ""));
+  return m ? m[1].trim() : String(author || "—");
+}
+
+function verdictClass(verdict) {
+  var v = String(verdict || "").toUpperCase();
+  if (v.indexOf("RISKY") === 0) { return "risky"; }
+  if (v.indexOf("CHANGE WITH CARE") === 0) { return "care"; }
+  if (v.indexOf("SAFE TO CHANGE") === 0) { return "safe"; }
+  return "unknown";
+}
+
+function show(el) { el.hidden = false; }
+function hide(el) { el.hidden = true; }
+
+/* ---------- error state ---------- */
+function apiDown() {
+  show(apiError);
+  dbDot.className = "dot down";
+  dbLabel.textContent = "FalkorDB: unreachable";
+  scrubber.disabled = true;
+  askButton.disabled = true;
+  hide(stateLoading);
+  hide(treeLoading);
+  hide(askLoading);
+}
+
+/* ---------- top bar ---------- */
+function renderStats(stats) {
+  repoName.textContent = stats.repo || "—";
+  commitCount.textContent = (stats.commits == null ? "—" : stats.commits) + " commits";
+  var ok = stats.db === "ok";
+  dbDot.className = "dot " + (ok ? "ok" : "down");
+  dbLabel.textContent = "FalkorDB: " + (ok ? "connected" : "down");
+}
+
+/* ---------- timeline ---------- */
+function renderScrubberLabel() {
+  var c = timeline[currentIndex];
+  if (!c) { return; }
+  stateLabel.textContent = fmtDate(c.timestamp);
+  stateMeta.textContent = shortSha(c.commit) + "  ·  " + authorShort(c.author);
+}
+
+async function fetchTimeline() {
+  show(stateLoading);
+  var res = await fetch(API + "/api/timeline");
+  hide(stateLoading);
+  if (!res.ok) { throw new Error("timeline " + res.status); }
+  var data = await res.json();
+  timeline = data.commits || [];
+  if (!timeline.length) { throw new Error("timeline empty"); }
+  scrubber.max = String(timeline.length - 1);
+  scrubber.value = String(timeline.length - 1);
+  scrubber.disabled = false;
+  currentIndex = timeline.length - 1;
+  renderScrubberLabel();
+}
+
+/* ---------- code state ---------- */
+async function fetchState(idx) {
+  var my = ++inflight;
+  var c = timeline[idx];
+  if (!c) { return; }
+  show(treeLoading);
+  moduleTree.innerHTML = "";
+  try {
+    var res = await fetch(API + "/api/state?t=" + encodeURIComponent(c.epoch));
+    if (!res.ok) { throw new Error("state " + res.status); }
+    var data = await res.json();
+    if (my !== inflight) { return; } // dropped: a newer scrub already won
+    currentState = data;
+    renderModules(data);
+    if (data.modules && data.modules.length && !selectedModule) {
+      selectModule(data.modules[0].id, data.modules[0].name);
+    }
+  } finally {
+    if (my === inflight) { hide(treeLoading); }
+  }
+}
+
+function renderModules(data) {
+  stateSummary.textContent =
+    (data.total_functions == null ? "—" : data.total_functions) + " functions · " +
+    (data.total_edges == null ? "—" : data.total_edges) + " edges";
+  var mods = data.modules || [];
+  moduleTree.innerHTML = mods.map(function (m) {
+    var sel = selectedModule && selectedModule.id === m.id;
+    return '<li>' +
+      '<button type="button" class="module-row' + (sel ? " selected" : "") + '"' +
+      ' data-id="' + esc(m.id) + '" data-name="' + esc(m.name) + '"' +
+      ' aria-pressed="' + (sel ? "true" : "false") + '"' +
+      ' aria-expanded="false">' +
+        '<span class="chev" aria-hidden="true">▸</span>' +
+        '<span class="module-name">' + esc(m.name) + "</span>" +
+        '<span class="fn-count mono">' + esc(m.n_functions) + " fn</span>" +
+      "</button>" +
+      '<div class="module-detail" hidden>' +
+        '<span class="mono">' + esc(m.id) + "</span>" +
+        "<span> · " + esc(m.n_functions) + " functions at " + esc(fmtDate(data.t)) + "</span>" +
+      "</div>" +
+    "</li>";
+  }).join("");
+
+  Array.prototype.forEach.call(moduleTree.querySelectorAll(".module-row"), function (btn) {
+    btn.addEventListener("click", function () {
+      var expanded = btn.getAttribute("aria-expanded") === "true";
+      btn.setAttribute("aria-expanded", String(!expanded));
+      var detail = btn.parentElement.querySelector(".module-detail");
+      if (detail) { detail.hidden = expanded; }
+      btn.querySelector(".chev").textContent = expanded ? "▸" : "▾";
+      // clicking a module also selects it as the question target
+      selectModule(btn.getAttribute("data-id"), btn.getAttribute("data-name"));
     });
   });
-});
-
-/* ---------- timeline view ---------- */
-
-var scrubber = document.getElementById("scrubber");
-var stateLabel = document.getElementById("state-label");
-var stateMeta = document.getElementById("state-meta");
-var nodeList = document.getElementById("node-list");
-var edgeList = document.getElementById("edge-list");
-
-function formatDate(iso) {
-  var d = new Date(iso);
-  return d.toISOString().slice(0, 10);
 }
 
-function renderState(idx) {
-  var snap = MOCK_TIMELINE[idx];
-  if (!snap) { return; }
-
-  stateLabel.textContent = "state at " + formatDate(snap.timestamp);
-  stateMeta.textContent = snap.commit + " · " + snap.author + " · " + snap.timestamp;
-
-  nodeList.innerHTML = snap.nodes.map(function (n) {
-    return '<li><span class="kind">' + esc(n.kind) + '</span>' + esc(n.id) + "</li>";
-  }).join("");
-
-  edgeList.innerHTML = snap.edges.map(function (e) {
-    return '<li><span class="edge-kind">' + esc(e.kind) + "</span>" +
-      esc(e.from) + " &rarr; " + esc(e.to) + "</li>";
-  }).join("");
+function selectModule(id, name) {
+  selectedModule = { id: id, name: name };
+  Array.prototype.forEach.call(moduleTree.querySelectorAll(".module-row"), function (btn) {
+    var sel = btn.getAttribute("data-id") === id;
+    btn.classList.toggle("selected", sel);
+    btn.setAttribute("aria-pressed", String(sel));
+  });
+  askInput.value = "Is it safe to change " + name + " today?";
 }
 
-scrubber.max = String(MOCK_TIMELINE.length - 1);
-scrubber.addEventListener("input", function () {
-  renderState(Number(scrubber.value));
-});
-renderState(0);
+/* ---------- ask ---------- */
+async function runQuery(question) {
+  var my = ++inflight;
+  var c = timeline[currentIndex];
+  show(askLoading);
+  askButton.disabled = true;
+  try {
+    var res = await fetch(API + "/api/query", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question: question, t: c ? c.epoch : null })
+    });
+    if (!res.ok) { throw new Error("query " + res.status); }
+    var data = await res.json();
+    if (my !== inflight) { return; }
+    renderVerdict(data, question);
+  } finally {
+    if (my === inflight) { hide(askLoading); askButton.disabled = false; }
+  }
+}
 
-/* ---------- ask view ---------- */
-
-var askForm = document.getElementById("ask-form");
-var askInput = document.getElementById("ask-input");
-var answerCard = document.getElementById("answer-card");
+function renderVerdict(data, question) {
+  verdictBadge.textContent = data.verdict || "—";
+  verdictBadge.className = "verdict-badge " + verdictClass(data.verdict);
+  verdictSummary.textContent = data.summary || "";
+  proofChain.innerHTML = (data.proof_chain || []).map(function (step, i) {
+    return "<li>" +
+      '<div class="step-title">Step ' + (i + 1) + ": " + esc(step.title) + "</div>" +
+      '<div class="evidence">' + esc(step.evidence) + "</div>" +
+      '<div class="source mono">' + esc(step.source) + "</div>" +
+    "</li>";
+  }).join("");
+  var qs = (data.meta && data.meta.queries_run) || [];
+  queriesRun.textContent = qs.length ? qs.join("  ·  ") : "—";
+  var meta = data.meta || {};
+  verdictMeta.textContent =
+    (meta.repo ? meta.repo + "  ·  " : "") +
+    (meta.target_id ? meta.target_id + "  ·  " : "") +
+    (meta.t ? fmtDate(meta.t) : "");
+  show(verdictCard);
+  // money-shot transition: visible update each time the verdict re-renders
+  verdictCard.classList.remove("flash");
+  void verdictCard.offsetWidth; // restart the animation
+  verdictCard.classList.add("flash");
+}
 
 askForm.addEventListener("submit", function (ev) {
   ev.preventDefault();
   var q = askInput.value.trim();
-  if (!q) { return; }
-
-  answerCard.hidden = false;
-  answerCard.innerHTML =
-    '<span class="mock-tag">Mock answer</span>' +
-    '<div class="verdict">' + esc(MOCK_ANSWER.verdict) + "</div>" +
-    '<p class="summary">' + esc(MOCK_ANSWER.summary) + "</p>" +
-    '<div class="proof-mini"><strong>Proof chain (preview)</strong><ul>' +
-    MOCK_ANSWER.proof_chain.map(function (p) {
-      return "<li>" + esc(p.title) + " — <em>" + esc(p.source) + "</em></li>";
-    }).join("") +
-    "</ul></div>";
+  if (!q || currentIndex < 0) { return; }
+  runQuery(q).catch(function () { apiDown(); });
 });
 
-/* ---------- proof view ---------- */
+/* ---------- scrubber: re-fetch state AND re-run the question ---------- */
+var scrubTimer = null;
+scrubber.addEventListener("input", function () {
+  currentIndex = Number(scrubber.value);
+  renderScrubberLabel();
+  clearTimeout(scrubTimer);
+  scrubTimer = setTimeout(function () {
+    Promise.all([fetchState(currentIndex)]).then(function () {
+      // the jaw-drop: verdict follows the scrubbed time
+      var q = askInput.value.trim();
+      if (q) { return runQuery(q); }
+    }).catch(function () { apiDown(); });
+  }, 250);
+});
 
-var chainList = document.getElementById("chain-list");
-
-chainList.innerHTML = MOCK_CHAIN.map(function (step, i) {
-  return "<li>" +
-    '<div class="step-title">Step ' + (i + 1) + ": " + esc(step.title) + "</div>" +
-    '<div class="evidence">' + esc(step.evidence) + "</div>" +
-    '<div class="source">' + esc(step.source) + "</div>" +
-    "</li>";
-}).join("");
+/* ---------- boot ---------- */
+(async function boot() {
+  try {
+    var statsRes = await fetch(API + "/api/stats");
+    if (!statsRes.ok) { throw new Error("stats " + statsRes.status); }
+    renderStats(await statsRes.json());
+    await fetchTimeline();
+    await fetchState(currentIndex);
+  } catch (e) {
+    apiDown();
+  }
+})();

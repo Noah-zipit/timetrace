@@ -456,13 +456,11 @@ INDEXES = [
 ]
 
 _NODE_OPEN = """\
-CYPHER rows=$rows
 UNWIND $rows AS row
 MERGE (n:%(label)s {id: row.id, valid_from: row.valid_from})
 SET n += row.props"""
 
 _PERSON_OPEN = """\
-CYPHER rows=$rows
 UNWIND $rows AS row
 MERGE (p:Person {email: row.email})
 SET p.id = row.email, p.name = row.name,
@@ -470,14 +468,12 @@ SET p.id = row.email, p.name = row.name,
     p.last_seen_at = row.ts, p.valid_to = NULL"""
 
 _NODE_CLOSE = """\
-CYPHER rows=$rows
 UNWIND $rows AS row
 MATCH (n:%(label)s {id: row.id, valid_from: row.valid_from})
 WHERE n.valid_to IS NULL
 SET n.valid_to = row.ts"""
 
 _EDGE_OPEN = """\
-CYPHER rows=$rows
 UNWIND $rows AS row
 MATCH (a {id: row.from_id}), (b {id: row.to_id})
 WHERE (row.from_vf IS NULL OR a.valid_from = row.from_vf)
@@ -486,13 +482,11 @@ CREATE (a)-[e:%(kind)s]->(b)
 SET e = row.props"""
 
 _EDGE_CLOSE = """\
-CYPHER rows=$rows
 UNWIND $rows AS row
 MATCH ()-[e]->() WHERE e.uid = row.uid AND e.valid_to IS NULL
 SET e.valid_to = row.ts"""
 
 _REPO_OPEN = """\
-CYPHER repo=$repo
 MERGE (r:Repository {name: $repo})
 SET r.id = 'repo:' + $repo,
     r.valid_from = coalesce(r.valid_from, timestamp()),
@@ -506,8 +500,13 @@ class FalkorWriter:
                  graph: str = "timetrace", batch: int = 800):
         from falkordb import FalkorDB
 
-        self.db = FalkorDB(host=host, port=port, username=username,
-                           password=password)
+        # No-auth servers (the local dev instance) reject AUTH with a bare
+        # username — only send credentials when a password is actually set.
+        kwargs: dict = {"host": host, "port": port}
+        if password:
+            kwargs["username"] = username
+            kwargs["password"] = password
+        self.db = FalkorDB(**kwargs)
         self.g = self.db.select_graph(graph)
         self.batch = batch
 
@@ -517,7 +516,8 @@ class FalkorWriter:
                 self.g.query(
                     f"CREATE INDEX FOR (n:{label}) ON (n.{prop})")
             except Exception as exc:  # already exists -> fine
-                if "already exists" not in str(exc).lower():
+                msg = str(exc).lower()
+                if "already exists" not in msg and "already indexed" not in msg:
                     raise
 
     def _run(self, query: str, **params) -> None:

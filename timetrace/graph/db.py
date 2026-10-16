@@ -71,19 +71,57 @@ class FalkorConfig:
 
 
 def get_config(dotenv_path: Optional[str] = None) -> FalkorConfig:
-    """Resolve config: OS env > .env file > local defaults.
+    """Resolve config.
+
+    Default call (no explicit path): OS env (non-empty) > repo .env > local
+    defaults. ``FALKORDB_LOCAL=1`` skips the .env entirely (dev flow).
+    ``FALKORDB_PASSWORD=""`` in the env is an explicit "no auth" and must
+    NOT fall through to a password stored in the .env.
+
+    Explicit ``dotenv_path`` (tests, fixtures): the file wins over ambient
+    OS env, so a pinned fixture file is deterministic.
 
     Accepts both FALKORDB_USER/FALKORDB_PASSWORD and the variant spellings
     FALKORDB_USERNAME/FALKORDB_PASS found in the cloud .env.
     """
-    file_env = load_dotenv(dotenv_path)
+    explicit = dotenv_path is not None
+    skip_file = os.environ.get("FALKORDB_LOCAL") == "1"
+    file_env = {} if skip_file else load_dotenv(dotenv_path)
+
+    def from_file(*keys: str) -> Optional[str]:
+        for key in keys:
+            v = file_env.get(key)
+            if v:
+                return v
+        return None
+
+    def from_env(*keys: str) -> Optional[str]:
+        for key in keys:
+            if key in os.environ:
+                v = os.environ[key]
+                if v:
+                    return v
+                if key in ("FALKORDB_PASSWORD", "FALKORDB_PASS"):
+                    return ""  # explicit clear: no auth
+                return _ABSENT
+        return _ABSENT
+
+    _ABSENT: Any = object()  # marker: no source provided this key
 
     def pick(*keys: str, default: Optional[str] = None) -> Optional[str]:
-        for key in keys:
-            value = os.environ.get(key) or file_env.get(key)
-            if value:
-                return value
-        return default
+        # "" is a real answer (explicit no-auth), not a miss — compare
+        # against the marker, never truthiness.
+        if explicit:
+            v = from_file(*keys)
+            if v is not None:
+                return v
+            v = from_env(*keys)
+            return default if v is _ABSENT else v
+        v = from_env(*keys)
+        if v is not _ABSENT:
+            return v
+        v = from_file(*keys)
+        return default if v is None else v
 
     host = pick("FALKORDB_HOST", default=DEFAULT_HOST)
     port = int(pick("FALKORDB_PORT", default=str(DEFAULT_PORT)) or DEFAULT_PORT)

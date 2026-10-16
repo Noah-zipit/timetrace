@@ -42,8 +42,14 @@ def load_env(path: str) -> dict[str, str]:
 
 
 def resolve_config() -> tuple[str, int, str, "str | None"]:
-    """OS env > .env file > local defaults (127.0.0.1:6380, no auth)."""
-    file_env = load_env(ENV_PATH)
+    """OS env > .env file > local defaults (127.0.0.1:6380, no auth).
+
+    Set FALKORDB_LOCAL=1 to ignore the ../.env file entirely (handy when
+    the .env holds production cloud creds but you want to test the local
+    dev instance — the connection code path is identical either way).
+    """
+    file_env = {} if os.environ.get("FALKORDB_LOCAL", "").strip().lower() in (
+        "1", "true", "yes") else load_env(ENV_PATH)
 
     def pick(*keys: str, default: "str | None" = None) -> "str | None":
         for key in keys:

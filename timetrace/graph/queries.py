@@ -97,14 +97,14 @@ def repo_stats(g: ReadOnlyGraph, repo: str) -> Dict[str, Any]:
     for label in ("Module", "Class", "Function", "Person"):
         rows = _rows(
             g,
-            f"CYPHER repo=$repo MATCH (r:Repository {{name: $repo}})"
+            f"MATCH (r:Repository {{name: $repo}})"
             f"<-[:IN_REPO]-(n:{label}) RETURN count(n) AS c",
             {"repo": repo},
         )
         out[f"n_{label.lower()}"] = rows[0][0] if rows else 0
     rows = _rows(
         g,
-        "CYPHER repo=$repo "
+        ""
         "MATCH (r:Repository {name: $repo})<-[:IN_REPO]-(n)"
         "<-[mod:MODIFIED]-(:Person)-[:AUTHORED]->(c:Commit) "
         "RETURN count(DISTINCT c) AS c",
@@ -113,7 +113,7 @@ def repo_stats(g: ReadOnlyGraph, repo: str) -> Dict[str, Any]:
     out["n_commits"] = rows[0][0] if rows else 0
     rows = _rows(
         g,
-        "CYPHER repo=$repo "
+        ""
         "MATCH (r:Repository {name: $repo})<-[:IN_REPO]-(a)-[e]->(b) "
         "RETURN type(e) AS kind, count(e) AS c",
         {"repo": repo},
@@ -135,7 +135,6 @@ def time_slice(g: ReadOnlyGraph, repo: str, t: int) -> Dict[str, Any]:
     Functions include methods (Module->Class->Function DEFINES chains).
     """
     cypher = f"""
-CYPHER t=$t, repo=$repo
 MATCH (r:Repository {{name: $repo}})<-[:IN_REPO]-(m:Module)
 WHERE {_win("m")}
 OPTIONAL MATCH (m)-[d:DEFINES]->(f)
@@ -143,11 +142,12 @@ WHERE {_win("d")} AND f:Function AND {_win("f")}
 WITH m, count(DISTINCT f.id) AS direct
 OPTIONAL MATCH (m)-[d1:DEFINES]->(c:Class)-[d2:DEFINES]->(mf:Function)
 WHERE {_win("d1")} AND {_win("c")} AND {_win("d2")} AND {_win("mf")}
-RETURN m.id AS id, m.name AS name, direct + count(DISTINCT mf.id) AS n_functions
-ORDER BY m.name
+WITH m, direct, count(DISTINCT mf.id) AS via_class
+RETURN m.id AS id, m.name AS name, coalesce(direct, 0) + coalesce(via_class, 0) AS n_functions
+ORDER BY name
 """
     rows = _rows(g, cypher, {"t": t, "repo": repo})
-    modules = [{"id": r[0], "name": r[1], "n_functions": r[2]} for r in rows]
+    modules = [{"id": r[0], "name": r[1], "n_functions": r[2] or 0} for r in rows]
     return {"modules": modules,
             "total_functions": sum(m["n_functions"] for m in modules)}
 
@@ -163,7 +163,7 @@ def _defined_functions(g: ReadOnlyGraph, repo: str, module_id: str,
     wm, wd, wf = _win("m"), _win("d"), _win("f")
     wd1, wc, wd2 = _win("d1"), _win("c"), _win("d2")
     cypher = (
-        "CYPHER t=$t, mid=$mid\n"
+        "\n"
         "MATCH (m:Module {id: $mid})-[d:DEFINES]->(f:Function)\n"
         f"WHERE {wm} AND {wd} AND {wf}\n"
         "RETURN DISTINCT f.id AS id, f.qualname AS qualname\n"
@@ -187,14 +187,12 @@ def _callers(g: ReadOnlyGraph, func_ids: List[str], t: int
     so every node and edge on the walk carries the window predicate.
     """
     direct_q = f"""
-CYPHER t=$t, fids=$fids
 UNWIND $fids AS fid
 MATCH (f:Function {{id: fid}})<-[e1:CALLS]-(c1:Function)
 WHERE {_win("f")} AND {_win("e1")} AND {_win("c1")}
 RETURN c1.id AS id, c1.qualname AS qualname, c1.module AS module, 1 AS hops
 """
     indirect_q = f"""
-CYPHER t=$t, fids=$fids
 UNWIND $fids AS fid
 MATCH (f:Function {{id: fid}})<-[e1:CALLS]-(c1:Function)<-[e2:CALLS]-(c2:Function)
 WHERE {_win("f")} AND {_win("e1")} AND {_win("c1")} AND {_win("e2")} AND {_win("c2")}
@@ -233,7 +231,6 @@ def _importers(g: ReadOnlyGraph, repo: str, module_id: str,
     dotted = path[:-3].replace("/", ".") if path.endswith(".py") else path
     top = dotted.split(".")[0]
     cypher = f"""
-CYPHER t=$t, mid=$mid, pfxext=$pfxext, dotted=$dotted, top=$top
 MATCH (imp:Module)-[im:IMPORTS]->(m:Module)
 WHERE (m.id = $mid
        OR (m.id STARTS WITH $pfxext AND (m.name = $dotted OR m.name = $top)))
@@ -309,7 +306,7 @@ def _subtree_ids(g: ReadOnlyGraph, repo: str, target_id: str) -> List[str]:
     ids = [target_id]
     if label == "Module":
         cypher = (
-            "CYPHER mid=$mid\n"
+            "\n"
             "MATCH (m:Module {id: $mid})-[:DEFINES]->(f:Function)\n"
             "RETURN DISTINCT f.id AS id\n"
             "UNION\n"
@@ -338,8 +335,7 @@ def _modified_changes(g: ReadOnlyGraph, ids: List[str],
     params: Dict[str, Any] = {"ids": ids}
     if since is not None:
         params["since"] = since
-    cypher = ("CYPHER ids=$ids" + (", since=$since" if since is not None else "")
-              + "\n" + "\nUNION\n".join(branches))
+    cypher = ("\n" + "\nUNION\n".join(branches))
     rows = _rows(g, cypher, params)
     changes = [{"ts": r[0], "commit": r[1], "author": r[2] or "",
                 "email": r[3] or "", "change": r[4], "target": r[5]}
@@ -356,7 +352,7 @@ def target_versions(g: ReadOnlyGraph, target_id: str) -> Dict[str, Any]:
     label = _label_for(target_id)
     rows = _rows(
         g,
-        f"CYPHER tid=$tid MATCH (n:{label} {{id: $tid}}) "
+        f"MATCH (n:{label} {{id: $tid}}) "
         "RETURN n.valid_from AS vf, n.valid_to AS vt ORDER BY vf",
         {"tid": target_id},
     )
@@ -415,7 +411,7 @@ def owners(g: ReadOnlyGraph, repo: str, target_id: str) -> List[Dict[str, Any]]:
             f"MATCH (p:Person)-[mod:MODIFIED]->(n:{label})\n"
             "WHERE n.id = nid\n"
             "RETURN p.name AS name, p.email AS email, count(mod) AS touches")
-    cypher = "CYPHER ids=$ids\n" + "\nUNION\n".join(branches)
+    cypher = "\n" + "\nUNION\n".join(branches)
     rows = _rows(g, cypher, {"ids": ids})
     agg: Dict[str, Dict[str, Any]] = {}
     for name, email, touches in rows:
@@ -437,7 +433,6 @@ def owners(g: ReadOnlyGraph, repo: str, target_id: str) -> List[Dict[str, Any]]:
 def _repo_commits(g: ReadOnlyGraph, repo: str) -> List[Dict[str, Any]]:
     """Commits that touched this repo, via MODIFIED edges into its subtree."""
     cypher = """
-CYPHER repo=$repo
 MATCH (r:Repository {name: $repo})<-[:IN_REPO]-(n)
       <-[mod:MODIFIED]-(p:Person)-[:AUTHORED]->(c:Commit)
 RETURN DISTINCT c.id AS commit, c.timestamp AS ts, p.name AS author, p.email AS email
@@ -450,7 +445,7 @@ ORDER BY ts
 def _label_windows(g: ReadOnlyGraph, repo: str,
                    label: str) -> List[Tuple[int, Optional[int]]]:
     """All (valid_from, valid_to) windows of a label inside the repo."""
-    cypher = (f"CYPHER repo=$repo MATCH (r:Repository {{name: $repo}})"
+    cypher = (f"MATCH (r:Repository {{name: $repo}})"
               f"<-[:IN_REPO]-(n:{label}) "
               "RETURN n.valid_from AS vf, n.valid_to AS vt")
     return [(r[0], r[1]) for r in _rows(g, cypher, {"repo": repo})]
@@ -540,7 +535,7 @@ def resolve_target(g: ReadOnlyGraph, repo: str,
         # 6: qualname substring, last resort
         branch("(n:Function)", "n.qualname CONTAINS $q AND n.id STARTS WITH $pxf", 6, "Function"),
     ]
-    cypher = ("CYPHER q=$q, pfxm=$pfxm, pxf=$pxf, pxc=$pxc\n"
+    cypher = ("\n"
               + "\nUNION\n".join(branches)
               + "\nORDER BY r, open DESC, vf DESC\nLIMIT 1")
     rows = _rows(g, cypher, {"q": q, "pfxm": pfx_m, "pxf": pfx_f, "pxc": pfx_c})

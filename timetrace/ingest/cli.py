@@ -69,12 +69,18 @@ def main() -> None:
         return
 
     env = _load_env(args.env)
-    host = args.host or env.get("FALKORDB_HOST")
-    port = args.port or int(env.get("FALKORDB_PORT", "6379"))
-    user = args.user or env.get("FALKORDB_USER", "falkordb")
-    password = args.password or env.get("FALKORDB_PASSWORD")
-    if not host or not password:
-        sys.exit("need FALKORDB_HOST and FALKORDB_PASSWORD (.env or flags)")
+    host = args.host if args.host is not None else env.get("FALKORDB_HOST")
+    port = (args.port if args.port is not None
+            else int(env.get("FALKORDB_PORT", "6379")))
+    user = (args.user if args.user is not None
+            else env.get("FALKORDB_USER", env.get("FALKORDB_USERNAME",
+                                                 "falkordb")))
+    if args.password is not None:
+        password = args.password  # "" = explicit no-auth (local instance)
+    else:
+        password = env.get("FALKORDB_PASSWORD", env.get("FALKORDB_PASS"))
+    if not host:
+        sys.exit("need FALKORDB_HOST (.env or --host)")
 
     writer = FalkorWriter(host, port, user, password, graph=args.graph)
     writer.create_indexes()
