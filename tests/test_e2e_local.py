@@ -101,7 +101,9 @@ def e2e_graph(tmp_path_factory):
     cfg = get_config()
     try:
         client = FalkorDB(**_client_kwargs(cfg))
-        client.select_graph(E2E_GRAPH).ro_query("RETURN 1 AS ok")
+        # write-mode probe: creates the throwaway graph if missing
+        # (ro_query on a nonexistent graph raises "empty key")
+        client.select_graph(E2E_GRAPH).query("RETURN 1 AS ok")
     except Exception as exc:  # noqa: BLE001 - skip, don't fail
         pytest.skip(f"FalkorDB unreachable at {cfg.host}:{cfg.port}: {exc}")
 

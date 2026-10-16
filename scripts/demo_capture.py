@@ -76,7 +76,7 @@ def ask(pg, question):
 def scrub_to(pg, index):
     pg.eval_on_selector("#scrubber",
                         f"el => {{ el.value = '{index}'; "
-                        "el.dispatchEvent(new Event('input', {bubbles: true})); }}")
+                        f"el.dispatchEvent(new Event('input', {{bubbles: true}})); }}")
     pg.wait_for_timeout(6000)
 
 

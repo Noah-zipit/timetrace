@@ -348,12 +348,14 @@ def plan_ingest(repo: str, snapshots: list[dict]) -> list[dict]:
             ops.append({"op": "node_close", "label": dold["label"],
                         "id": old_id, "valid_from": dold["valid_from"],
                         "ts": ts})
+            del open_nodes[old_id]  # closed: a later reappearance must reopen
             renamed_new[new_id] = (old_id, sim)
 
         # close deleted (non-renamed)
         for nid, dold in deleted.items():
             ops.append({"op": "node_close", "label": dold["label"],
                         "id": nid, "valid_from": dold["valid_from"], "ts": ts})
+            del open_nodes[nid]  # closed: a later reappearance must reopen
             ops.append(
                 {"op": "edge_open", "kind": "MODIFIED",
                  "from_id": email, "from_vf": None,

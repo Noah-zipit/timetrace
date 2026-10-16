@@ -391,3 +391,21 @@ def test_rename_accepts_function_in_moved_file():
     assert len(ren) == 1
     assert ren[0]["from_id"] == "func:demo:tests/test_a.py:test_render"
     assert ren[0]["to_id"] == "func:demo:tests/test_b.py:test_render"
+
+
+def test_node_reappearing_after_deletion_reopens():
+    # module present -> absent -> present: two versions, one close
+    m = _mod("rich/live.py")
+    ops = plan_ingest("demo", [
+        _snap("c1", T1, [m], []),
+        _snap("c2", T2, [], []),
+        _snap("c3", T3, [m], []),
+    ])
+    opens = [o for o in ops if o["op"] == "node_open"
+             and o.get("label") == "Module"]
+    closes = [o for o in ops if o["op"] == "node_close"]
+    assert len(opens) == 2
+    assert len(closes) == 1
+    assert opens[0]["valid_from"] == epoch_seconds(T1)
+    assert opens[1]["valid_from"] == epoch_seconds(T3)
+    assert closes[0]["ts"] == epoch_seconds(T2)
