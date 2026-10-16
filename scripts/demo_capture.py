@@ -113,19 +113,32 @@ def video():
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / "raw").mkdir(parents=True, exist_ok=True)
     with sync_playwright() as p:
-        b, pg = new_page(p, record_video=True)
+        b = p.chromium.launch(executable_path=CHROME,
+                              args=["--no-sandbox", "--disable-gpu"])
+        ctx = b.new_context(viewport={"width": 1280, "height": 800},
+                            record_video_dir=str(OUT / "raw"),
+                            record_video_size={"width": 1280, "height": 800})
+        pg = ctx.new_page()
+        shim(pg)
         pg.goto(BASE + "/")
-        pg.wait_for_timeout(3500)                       # settle on timeline
+        # settle on fully-loaded timeline before the story starts
+        pg.wait_for_selector("#module-tree .module-row", timeout=60000)
+        pg.wait_for_timeout(2000)
         ask(pg, QUESTION)                              # the money question
         pg.wait_for_timeout(2500)                      # hold the verdict
         scrub_to(pg, 2)                                # travel back in time
         pg.wait_for_timeout(2500)                      # hold changed verdict
         scrub_to(pg, 60)                               # back to the present
         pg.wait_for_timeout(2000)
-        path = pg.video.path()
+        video_path = pg.video.path()
+        pg.close()
+        ctx.close()          # finalizes the video file — must precede rename
         b.close()
+        time.sleep(2)        # let the muxer finish writing the trailer
         final = OUT / "timetrace-demo-raw.webm"
-        Path(path).rename(final)
+        if final.exists():
+            final.unlink()
+        Path(video_path).rename(final)
         print("video:", final)
         return final
 
