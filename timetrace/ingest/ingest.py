@@ -18,6 +18,11 @@ Two deliberate, documented extensions of data-model.md:
   (event semantics, like the doc's AUTHORED/MODIFIED edges).
 - Every version node gets an IN_REPO edge to the :Repository node (doc
   section 8 requires "a link up to its Repository node").
+- IMPORTS edges target real in-repo modules when the dotted alias resolves
+  to one in the current snapshot: "a/b.py" is tried first, then
+  "a/b/__init__.py". Only unresolvable aliases (stdlib, third-party)
+  land on "module:<repo>:$ext:<alias>" stub nodes, which keeps the
+  "who imports this module" evidence on the real Module node.
 """
 
 from __future__ import annotations
@@ -188,11 +193,26 @@ def plan_ingest(repo: str, snapshots: list[dict]) -> list[dict]:
         for n in snap["nodes"]:
             label, nid = rekey_node_id(n["id"], repo)
             cur[nid] = {**n, "_nid": nid, "_label": label}
+        def _resolve_import(alias: str) -> str | None:
+            """Dotted import alias -> real in-repo module id, or None.
+
+            Resolution order: "<a/b>.py", then "<a/b>/__init__.py",
+            against this snapshot's module node ids.
+            """
+            stem = alias.replace(".", "/")
+            for candidate in (stem + ".py", stem + "/__init__.py"):
+                mid = f"module:{repo}:{candidate}"
+                if mid in cur:
+                    return mid
+            return None
+
         ext_ids: dict[str, dict] = {}
         for e in snap["edges"]:
             if e["kind"] == "imports":
                 raw_to = e["to"]  # 'module:<alias.name>'
                 alias = _rest(raw_to)
+                if _resolve_import(alias) is not None:
+                    continue  # edge targets the real module; no stub needed
                 eid = f"module:{repo}:$ext:{alias}"
                 if eid not in ext_ids and eid not in cur:
                     stub = {
@@ -336,6 +356,10 @@ def plan_ingest(repo: str, snapshots: list[dict]) -> list[dict]:
                                "valid_to": ts}})
 
         # --- diff edges --------------------------------------------------
+        # Edges open as this snapshot starts; only these are candidates for
+        # version re-pointing below (edges opened/closed by the diff itself
+        # already pin the right versions).
+        pre_open_keys = set(open_edges)
         cur_edges: dict[tuple, dict] = {}
         for e in snap["edges"]:
             kind = e["kind"]
@@ -354,7 +378,8 @@ def plan_ingest(repo: str, snapshots: list[dict]) -> list[dict]:
                                   "props": {"callee": e.get("callee", "")}}
             elif kind == "imports":
                 alias = _rest(e["to"])
-                to = f"module:{repo}:$ext:{alias}"
+                to = (_resolve_import(alias)
+                      or f"module:{repo}:$ext:{alias}")
                 key = _edge_key(kind, frm, to)
                 cur_edges[key] = {"kind": "IMPORTS", "from": frm,
                                   "to": to,
@@ -376,7 +401,40 @@ def plan_ingest(repo: str, snapshots: list[dict]) -> list[dict]:
                             "to_id": ce["to"], "to_vf": to_v,
                             "valid_from": ts, "props": props})
                 open_edges[key] = {"uid": uid, "valid_from": ts,
-                                   "kind": ce["kind"]}
+                                   "kind": ce["kind"],
+                                   "from": ce["from"], "to": ce["to"],
+                                   "from_vf": frm_v, "to_vf": to_v,
+                                   "props": ce["props"]}
+
+        # --- re-point edges after node-version rollover ------------------
+        # A modified node keeps its id but opens a new version
+        # (valid_from=ts). Edges pinned to the old version would otherwise
+        # outlive it, so close each incident open edge and reopen it on
+        # the new version: same kind, same other endpoint, new @ts uid,
+        # valid_from=ts, edge-specific props (callee, names) preserved.
+        # Renames are excluded: they change ids, so the diff loop above
+        # already closes/reopens the affected edges.
+        if reopened:
+            for key in list(pre_open_keys):
+                oe = open_edges.get(key)
+                if oe is None:
+                    continue  # dropped by the edge diff above
+                new_from_vf = ts if oe["from"] in reopened else oe["from_vf"]
+                new_to_vf = ts if oe["to"] in reopened else oe["to_vf"]
+                if (new_from_vf == oe["from_vf"]
+                        and new_to_vf == oe["to_vf"]):
+                    continue  # untouched by any rollover
+                ops.append({"op": "edge_close", "uid": oe["uid"], "ts": ts})
+                new_uid = f"{oe['kind']}:{oe['from']}>{oe['to']}@{ts}"
+                props = {"uid": new_uid, "valid_from": ts, "valid_to": None,
+                         **oe["props"]}
+                ops.append({"op": "edge_open", "kind": oe["kind"],
+                            "from_id": oe["from"], "from_vf": new_from_vf,
+                            "to_id": oe["to"], "to_vf": new_to_vf,
+                            "valid_from": ts, "props": props})
+                open_edges[key] = {**oe, "uid": new_uid, "valid_from": ts,
+                                   "from_vf": new_from_vf,
+                                   "to_vf": new_to_vf}
 
     return ops
 
@@ -502,17 +560,22 @@ class FalkorWriter:
                           rows=rows[i:i + self.batch])
             counts[f"node_close:{label}"] = len(rows)
 
+        edge_opens: dict[str, list[dict]] = {}
         for op in by_kind.get("edge_open", []):
-            row = {"from_id": op["from_id"], "from_vf": op["from_vf"],
-                   "to_id": op["to_id"], "to_vf": op["to_vf"],
-                   "props": op["props"]}
-            self._run(_EDGE_OPEN % {"kind": op["kind"]}, rows=[row])
-            counts[f"edge_open:{op['kind']}"] = \
-                counts.get(f"edge_open:{op['kind']}", 0) + 1
+            edge_opens.setdefault(op["kind"], []).append({
+                "from_id": op["from_id"], "from_vf": op["from_vf"],
+                "to_id": op["to_id"], "to_vf": op["to_vf"],
+                "props": op["props"]})
+        for kind, rows in edge_opens.items():
+            for i in range(0, len(rows), self.batch):
+                self._run(_EDGE_OPEN % {"kind": kind},
+                          rows=rows[i:i + self.batch])
+            counts[f"edge_open:{kind}"] = len(rows)
 
-        for op in by_kind.get("edge_close", []):
-            self._run(_EDGE_CLOSE,
-                      rows=[{"uid": op["uid"], "ts": op["ts"]}])
-            counts["edge_close"] = counts.get("edge_close", 0) + 1
+        edge_closes = [{"uid": op["uid"], "ts": op["ts"]}
+                       for op in by_kind.get("edge_close", [])]
+        for i in range(0, len(edge_closes), self.batch):
+            self._run(_EDGE_CLOSE, rows=edge_closes[i:i + self.batch])
+        counts["edge_close"] = len(edge_closes)
 
         return counts

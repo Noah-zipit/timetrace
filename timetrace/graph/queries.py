@@ -222,11 +222,12 @@ def _importers(g: ReadOnlyGraph, repo: str, module_id: str,
                t: int) -> List[Dict[str, Any]]:
     """Modules with an open IMPORTS edge into the module at t.
 
-    The planner routes every imports edge at an ``$ext:`` stub node rather
-    than the real in-repo module (it cannot resolve import names to files),
-    so this matches edges into the module id itself AND into its stub —
-    otherwise "importing modules" would always be empty on planner-ingested
-    data. The stub is identified by the module's dotted import name.
+    The planner targets IMPORTS edges at the real in-repo module when the
+    dotted alias resolves to one in the snapshot ("a/b.py", then
+    "a/b/__init__.py"), falling back to an ``$ext:`` stub node only for
+    truly external imports — so this matches edges into the module id
+    itself AND into its stub. The stub is identified by the module's
+    dotted import name.
     """
     path = module_id.split(":", 2)[2]
     dotted = path[:-3].replace("/", ".") if path.endswith(".py") else path
