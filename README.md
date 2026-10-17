@@ -42,20 +42,19 @@ unreachable the API returns an honest 503 instead of a fake answer.
 
 **https://timetrace-demo.vercel.app** — the app, live.
 
-Status 2026-10-17: the app is deployed and healthy, but the demo graph is
-not in the cloud database yet — the FalkorDB Cloud instance endpoint saved
-on Oct 15 no longer resolves in public DNS (NXDOMAIN), so the instance was
-reclaimed or its endpoint changed. The data is staged and ready: 20,257
-pre-planned ingest ops in 14 chunks under `~/workspace/graph-hacks/ops-chunks`
-(built from the verified local snapshots in `demo-data/rich-snapshots`),
-plus `POST /api/ingest-ops` on the live app for the chunked load. The whole
-path is verified end to end locally: same chunks → `/api/ingest-ops` →
-`/api/stats` (61 commits, 2,596 functions) → `/api/query` returns the RISKY
-verdict on `rich/console.py` with a 4-claim proof chain.
-
-To finish: create/start a FalkorDB Cloud instance, set its
-`FALKORDB_HOST/PORT/USERNAME/PASSWORD` as repo secrets + Vercel env vars,
-then POST the 14 chunks in order (first chunk with `create_indexes: true`).
+Status 2026-10-17: **fully live and verified.** The FalkorDB Cloud instance
+was restored, and all 20,257 pre-planned ingest ops in 14 chunks (under
+`~/workspace/graph-hacks/ops-chunks`, built from the verified local snapshots
+in `demo-data/rich-snapshots`) were loaded into it through
+`POST /api/ingest-ops` on the live app — first chunk with
+`create_indexes: true`. Live verification on the deployed site:
+`/api/stats` returns connected:true, repo rich, 61 commits, 2,596 functions;
+`/api/timeline` returns 61 commits; and `POST /api/query` with
+`{"question": "Is it safe to change rich/console.py?"}` returns verdict
+**RISKY** with a 4-claim proof chain (58 direct callers, 119 importing
+modules, most-touched by Will McGugan). One chunk needed a retry on a
+dropped connection; edge opens are MERGE-keyed by stable uid since commit
+`d03a6df`, so the re-send was a verified no-op with zero duplicate edges.
 
 ## Demo video
 

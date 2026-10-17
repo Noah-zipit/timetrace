@@ -80,15 +80,11 @@ repository, and takes responsibility for the submission.
 
 ## Deployment status
 
-Live at **https://timetrace-demo.vercel.app** (app deployed and healthy).
-
-One caveat the judges should know: as of 2026-10-17 the live app's demo
-graph is not yet loaded into FalkorDB Cloud — the cloud instance endpoint
-saved on Oct 15 no longer resolves in public DNS, so its data could not be
-ingested before the submission. The full interactive demo (UI + timeline
-scrubber + verdicts with proof chains) is verified locally against the real
-graph: 61 sampled commits of Textualize/rich, 420 modules, 318 classes,
-2,576 functions. The cloud load is staged and ready (20,257 pre-planned
-ops; the app ships a chunked `POST /api/ingest-ops` for it) and completes
-as soon as the cloud instance endpoint is restored. The demo video below
-shows the working product on the real graph regardless.
+Live at **https://timetrace-demo.vercel.app** — fully loaded and verified
+as of 2026-10-17. The demo graph lives in FalkorDB Cloud (61 sampled commits
+of Textualize/rich, 2,596 functions, 13,384 temporal edges) and was verified
+on the deployed site: `/api/stats` (connected:true), `/api/timeline` (61
+commits), and `POST /api/query` for "Is it safe to change rich/console.py?"
+returns verdict **RISKY** with a 4-claim proof chain. The full interactive
+demo (UI + timeline scrubber + verdicts with proof chains) runs against the
+live cloud graph — the demo video below shows the same product.
