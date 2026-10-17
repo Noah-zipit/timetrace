@@ -56,6 +56,19 @@ class IngestRequest(BaseModel):
     repo: Optional[str] = None
 
 
+class IngestOpsRequest(BaseModel):
+    """Pre-planned ops (from plan_ingest) executed in chunks.
+
+    Exists so the graph can be built against a remote FalkorDB from
+    environments with bounded request time (e.g. serverless): the planner
+    is pure and runs wherever, and each POST executes one chunk of ops.
+    create_indexes=true on the first chunk only. Ops are NOT idempotent
+    for edge opens — run each chunk exactly once per fresh graph.
+    """
+    ops: List[Dict[str, Any]]
+    create_indexes: bool = False
+
+
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
@@ -237,6 +250,34 @@ def ingest(req: IngestRequest) -> JSONResponse:
         "note": "Nodes are idempotent (MERGE on id+valid_from); edge opens "
                 "are CREATEs — re-ingesting the same snapshots duplicates edges.",
     })
+
+
+@app.post("/api/ingest-ops")
+def ingest_ops(req: IngestOpsRequest) -> JSONResponse:
+    """Execute one chunk of pre-planned ingest ops.
+
+    Body: {"ops": [...], "create_indexes": true|false}.
+    See IngestOpsRequest for the why: planning is pure and happens off-
+    server; each chunk runs through FalkorWriter.write_ops in UNWIND
+    batches against the configured FalkorDB.
+    """
+    from timetrace.ingest import FalkorWriter
+
+    cfg = get_config()
+    try:
+        writer = FalkorWriter(cfg.host, cfg.port, cfg.username,
+                              cfg.password, graph=cfg.graph)
+        if req.create_indexes:
+            writer.create_indexes()
+        written = writer.write_ops(req.ops)
+    except Exception as exc:  # noqa: BLE001 - surfaced as 502 detail
+        return JSONResponse(
+            status_code=502,
+            content={"detail": f"ingest-ops failed against "
+                               f"{cfg.host}:{cfg.port}: {exc}"})
+    return JSONResponse(status_code=200, content={
+        "graph": cfg.graph, "ops_received": len(req.ops),
+        "written": written})
 
 
 # UI shell, served last so API routes win. Path resolved from this module's
