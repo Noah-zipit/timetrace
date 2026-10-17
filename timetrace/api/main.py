@@ -259,6 +259,32 @@ def ingest(req: IngestRequest) -> JSONResponse:
     })
 
 
+@app.get("/api/diag-net")
+def diag_net() -> JSONResponse:
+    """One-shot network diagnostic (no secrets): DNS + raw TCP to the
+    configured FalkorDB host:port. Helps distinguish Vercel-side egress
+    blocks from instance-side problems."""
+    import socket as _socket
+
+    cfg = get_config()
+    out: Dict[str, Any] = {"host": cfg.host, "port": cfg.port}
+    try:
+        out["dns"] = _socket.gethostbyname(cfg.host)
+    except Exception as exc:  # noqa: BLE001
+        out["dns_error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
+        return JSONResponse(status_code=200, content=out)
+    s = _socket.socket()
+    s.settimeout(8)
+    try:
+        s.connect((cfg.host, cfg.port))
+        out["tcp"] = "connected"
+    except Exception as exc:  # noqa: BLE001
+        out["tcp_error"] = f"{type(exc).__name__}: {str(exc)[:150]}"
+    finally:
+        s.close()
+    return JSONResponse(status_code=200, content=out)
+
+
 @app.post("/api/ingest-ops")
 def ingest_ops(req: IngestOpsRequest) -> JSONResponse:
     """Execute one chunk of pre-planned ingest ops.
