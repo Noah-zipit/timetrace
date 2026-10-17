@@ -38,6 +38,25 @@ unreachable the API returns an honest 503 instead of a fake answer.
 ![Verdict with proof chain](ui/qa/02-verdict-now.png)
 ![Same question, asked in 2020 — different verdict](ui/qa/03-verdict-scrubbed.png)
 
+## Live demo
+
+**https://timetrace-demo.vercel.app** — the app, live.
+
+Status 2026-10-17: the app is deployed and healthy, but the demo graph is
+not in the cloud database yet — the FalkorDB Cloud instance endpoint saved
+on Oct 15 no longer resolves in public DNS (NXDOMAIN), so the instance was
+reclaimed or its endpoint changed. The data is staged and ready: 20,257
+pre-planned ingest ops in 14 chunks under `~/workspace/graph-hacks/ops-chunks`
+(built from the verified local snapshots in `demo-data/rich-snapshots`),
+plus `POST /api/ingest-ops` on the live app for the chunked load. The whole
+path is verified end to end locally: same chunks → `/api/ingest-ops` →
+`/api/stats` (61 commits, 2,596 functions) → `/api/query` returns the RISKY
+verdict on `rich/console.py` with a 4-claim proof chain.
+
+To finish: create/start a FalkorDB Cloud instance, set its
+`FALKORDB_HOST/PORT/USERNAME/PASSWORD` as repo secrets + Vercel env vars,
+then POST the 14 chunks in order (first chunk with `create_indexes: true`).
+
 ## Demo video
 
 [`ui/qa/timetrace-demo.mp4`](ui/qa/timetrace-demo.mp4) — silent walkthrough with

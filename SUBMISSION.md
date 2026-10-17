@@ -80,9 +80,15 @@ repository, and takes responsibility for the submission.
 
 ## Deployment status
 
-Not deployed to a public URL. Per the rules, submitting as a non-deployed
-project with complete local setup instructions (README: clone → local
-FalkorDB via the shipped start script → ingest → run) plus the working demo
-video above. The FalkorDB Cloud connection is a pure `.env` swap — no code
-changes — and the app was developed and verified against a local FalkorDB
-with identical Cypher semantics.
+Live at **https://timetrace-demo.vercel.app** (app deployed and healthy).
+
+One caveat the judges should know: as of 2026-10-17 the live app's demo
+graph is not yet loaded into FalkorDB Cloud — the cloud instance endpoint
+saved on Oct 15 no longer resolves in public DNS, so its data could not be
+ingested before the submission. The full interactive demo (UI + timeline
+scrubber + verdicts with proof chains) is verified locally against the real
+graph: 61 sampled commits of Textualize/rich, 420 modules, 318 classes,
+2,576 functions. The cloud load is staged and ready (20,257 pre-planned
+ops; the app ships a chunked `POST /api/ingest-ops` for it) and completes
+as soon as the cloud instance endpoint is restored. The demo video below
+shows the working product on the real graph regardless.
