@@ -4,10 +4,13 @@
    honest error and renders nothing fabricated.
 
    Contract:
-     GET  /api/stats             -> repo name, commit count, db status
-     GET  /api/timeline          -> commits[] {commit, author, timestamp, epoch, ...}
-     GET  /api/state?t=<epoch>   -> modules[] {id, name, n_functions}, totals
-     POST /api/query {question, t} -> {verdict, summary, proof_chain[], meta}
+     GET  /api/repos                          -> analyzed repos
+     GET  /api/stats?repo=                    -> repo name, commit count, db status
+     GET  /api/timeline?repo=                 -> commits[] {commit, author, timestamp, epoch, ...}
+     GET  /api/state?t=<epoch>&repo=          -> modules[] {id, name, n_functions}, totals
+     POST /api/query {question, t, repo}      -> {verdict, summary, proof_chain[], meta}
+     POST /api/analyze/start {repo_url}       -> analyze job
+     POST /api/analyze/step {repo}            -> one commit per call
 */
 
 "use strict";
@@ -39,9 +42,15 @@ var verdictSummary = $("verdict-summary");
 var proofChain = $("proof-chain");
 var queriesRun = $("queries-run");
 var verdictMeta = $("verdict-meta");
+var repoSelect = $("repo-select");
+var analyzeForm = $("analyze-form");
+var repoUrl = $("repo-url");
+var analyzeButton = $("analyze-button");
+var analyzeProgress = $("analyze-progress");
 
 /* ---------- state ---------- */
 var timeline = [];        // commits from /api/timeline, ascending
+var currentRepo = "rich"; // the bundled demo; switchable via the repo bar
 var currentIndex = -1;    // scrubber position
 var currentState = null;  // last /api/state payload
 var selectedModule = null;// {id, name}
@@ -118,7 +127,7 @@ function fmtEpoch(epoch) {
 
 async function fetchTimeline() {
   show(stateLoading);
-  var res = await fetch(API + "/api/timeline");
+  var res = await fetch(API + "/api/timeline?repo=" + encodeURIComponent(currentRepo));
   hide(stateLoading);
   if (!res.ok) { throw new Error("timeline " + res.status); }
   var data = await res.json();
@@ -139,7 +148,8 @@ async function fetchState(idx) {
   show(treeLoading);
   moduleTree.innerHTML = "";
   try {
-    var res = await fetch(API + "/api/state?t=" + encodeURIComponent(c.timestamp.epoch));
+    var res = await fetch(API + "/api/state?t=" + encodeURIComponent(c.timestamp.epoch) +
+      "&repo=" + encodeURIComponent(currentRepo));
     if (!res.ok) { throw new Error("state " + res.status); }
     var data = await res.json();
     if (my !== inflight) { return; } // dropped: a newer scrub already won
@@ -212,7 +222,8 @@ async function runQuery(question) {
     var res = await fetch(API + "/api/query", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question: question, t: c && c.timestamp ? c.timestamp.epoch : null })
+      body: JSON.stringify({ question: question, repo: currentRepo,
+        t: c && c.timestamp ? c.timestamp.epoch : null })
     });
     if (!res.ok) { throw new Error("query " + res.status); }
     var data = await res.json();
@@ -270,10 +281,102 @@ scrubber.addEventListener("input", function () {
   }, 250);
 });
 
+/* ---------- repo bar: switcher + analyze flow ---------- */
+async function loadRepos() {
+  var res = await fetch(API + "/api/repos");
+  if (!res.ok) { return; }
+  var data = await res.json();
+  var repos = data.repos || [];
+  repoSelect.innerHTML = repos.map(function (r) {
+    var label = r.repo + (r.status && r.status !== "ready" ? " (" + r.status + ")" : "");
+    return '<option value="' + esc(r.repo) + '"' +
+      (r.repo === currentRepo ? " selected" : "") + ">" + esc(label) + "</option>";
+  }).join("");
+}
+
+async function switchRepo(repo) {
+  currentRepo = repo;
+  selectedModule = null;
+  hide(verdictCard);
+  askInput.value = "";
+  inflight++; // drop any in-flight responses from the old repo
+  try {
+    var statsRes = await fetch(API + "/api/stats?repo=" + encodeURIComponent(repo));
+    if (!statsRes.ok) { throw new Error("stats " + statsRes.status); }
+    renderStats(await statsRes.json());
+    await fetchTimeline();
+    await fetchState(currentIndex);
+  } catch (e) {
+    apiDown();
+  }
+}
+
+repoSelect.addEventListener("change", function () {
+  if (repoSelect.value && repoSelect.value !== currentRepo) {
+    switchRepo(repoSelect.value);
+  }
+});
+
+function analyzeMsg(text) {
+  show(analyzeProgress);
+  analyzeProgress.textContent = text;
+}
+
+analyzeForm.addEventListener("submit", function (ev) {
+  ev.preventDefault();
+  var url = repoUrl.value.trim();
+  if (!url) { return; }
+  analyzeButton.disabled = true;
+  analyzeMsg("Starting analysis…");
+  var job = null;
+  fetch(API + "/api/analyze/start", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ repo_url: url })
+  }).then(function (res) {
+    return res.json().then(function (data) {
+      if (!res.ok) { throw new Error(data.detail || ("start " + res.status)); }
+      return data;
+    });
+  }).then(function (data) {
+    job = data;
+    return driveSteps(job.repo);
+  }).then(function () {
+    analyzeMsg(job.repo + ": analysis complete — loaded into the timeline.");
+    repoUrl.value = "";
+    return loadRepos().then(function () { return switchRepo(job.repo); });
+  }).catch(function (err) {
+    analyzeMsg("Analyze failed: " + err.message);
+  }).then(function () {
+    analyzeButton.disabled = false;
+    setTimeout(function () { hide(analyzeProgress); }, 6000);
+  });
+});
+
+function driveSteps(repo) {
+  // one commit per call; the server plans + writes each step idempotently
+  return fetch(API + "/api/analyze/step", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ repo: repo })
+  }).then(function (res) {
+    return res.json().then(function (data) {
+      if (!res.ok) { throw new Error(data.detail || ("step " + res.status)); }
+      return data;
+    });
+  }).then(function (data) {
+    analyzeMsg(repo + ": commit " + data.done + " / " + data.total + "…");
+    if (data.status === "done") { return; }
+    return new Promise(function (resolve) { setTimeout(resolve, 400); })
+      .then(function () { return driveSteps(repo); });
+  });
+}
+
 /* ---------- boot ---------- */
 (async function boot() {
   try {
-    var statsRes = await fetch(API + "/api/stats");
+    await loadRepos();
+    var statsRes = await fetch(API + "/api/stats?repo=" + encodeURIComponent(currentRepo));
     if (!statsRes.ok) { throw new Error("stats " + statsRes.status); }
     renderStats(await statsRes.json());
     await fetchTimeline();

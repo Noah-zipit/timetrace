@@ -20,6 +20,18 @@
     </div>
   </header>
 
+  <div class="repobar">
+    <label for="repo-select" class="sr-only">Repository</label>
+    <select id="repo-select" class="repo-select" aria-label="Repository"></select>
+    <form id="analyze-form" class="analyze-form">
+      <label for="repo-url" class="sr-only">Analyze a GitHub repo</label>
+      <input type="text" id="repo-url" autocomplete="off" spellcheck="false"
+             placeholder="Paste a GitHub repo URL — e.g. github.com/tqdm/tqdm">
+      <button type="submit" id="analyze-button">Analyze repo</button>
+    </form>
+    <div id="analyze-progress" class="analyze-progress mono" hidden></div>
+  </div>
+
   <div id="api-error" class="api-error" hidden role="alert">
     Cannot reach timetrace API / FalkorDB — see README local setup.
   </div>

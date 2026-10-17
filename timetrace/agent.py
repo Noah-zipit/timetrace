@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 
 from timetrace.graph import queries as Q
 from timetrace.graph.db import ReadOnlyGraph, require_db
+from timetrace.analyze.jobs import require_db_named
 
 # ---------------------------------------------------------------------------
 # question parsing (pure — unit tested)
@@ -140,7 +141,8 @@ def _names(items: List[Dict[str, Any]], key: str = "qualname",
 
 def _clarify(summary: str, meta_extra: Optional[Dict[str, Any]] = None
              ) -> Dict[str, Any]:
-    meta = {"target_id": None, "t": None, "repo": None, "queries_run": []}
+    meta = {"target_id": None, "t": None, "repo": None, "graph": None,
+            "queries_run": []}
     if meta_extra:
         meta.update(meta_extra)
     return {"verdict": "NEED MORE INFO", "summary": summary,
@@ -153,8 +155,12 @@ def _clarify(summary: str, meta_extra: Optional[Dict[str, Any]] = None
 
 
 def answer(question: str, t: Optional[int] = None,
-           repo: Optional[str] = None) -> Dict[str, Any]:
+           repo: Optional[str] = None,
+           graph: Optional[str] = None) -> Dict[str, Any]:
     """Answer a temporal code question from the graph only.
+
+    ``graph`` selects the per-repo FalkorDB graph (default: the rich demo
+    graph). Every fact still comes from graph queries only.
 
     Returns {"verdict", "summary", "proof_chain": [{title, evidence,
     source}], "meta": {target_id, t, repo, queries_run}}.
@@ -173,7 +179,9 @@ def answer(question: str, t: Optional[int] = None,
             "is it safe to change \"rich/console.py\"?",
             {"t": now_t, "repo": repo})
 
-    g: ReadOnlyGraph = require_db()  # honest 503 when unreachable
+    # honest 503 when unreachable
+    g: ReadOnlyGraph = (require_db_named(graph) if graph
+                        else require_db())
 
     if repo is None:
         repo = Q.default_repo(g)
@@ -325,7 +333,7 @@ def answer(question: str, t: Optional[int] = None,
         "summary": summary,
         "proof_chain": chain,
         "meta": {"target_id": target_id, "t": now_t, "repo": repo,
-                 "queries_run": queries_run},
+                 "graph": graph, "queries_run": queries_run},
     }
 
 

@@ -95,4 +95,5 @@ def test_answer_asks_for_clarification_when_unparseable():
 def test_answer_result_shape_keys():
     out = A.answer("???")
     assert set(out) == {"verdict", "summary", "proof_chain", "meta"}
-    assert set(out["meta"]) == {"target_id", "t", "repo", "queries_run"}
+    assert set(out["meta"]) == {"target_id", "t", "repo", "graph",
+                                 "queries_run"}

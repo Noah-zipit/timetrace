@@ -1,25 +1,38 @@
 """timetrace API (event week).
 
-Live endpoints over the temporal FalkorDB graph:
+Paste ANY public GitHub repo URL and timetrace builds a temporal graph of
+it, then answers "can I safely change X?" against that repo's history. The
+Textualize/rich demo stays as the bundled default.
+
+Live endpoints over the temporal FalkorDB graphs:
   GET  /api/health    — liveness, no DB needed
+  GET  /api/repos     — analyzed repos (rich demo + user-analyzed)
   GET  /api/stats     — repo/commit/node/edge counts + DB connectivity
   GET  /api/timeline  — commit list powering the timeline scrubber
   GET  /api/state     — time_slice at ?t=<epoch> (+ repo stats)
   POST /api/query     — the temporal agent: {question, t?, repo?}
   POST /api/ingest    — run the ingest planner + writer in-process
+  POST /api/analyze/start — begin analyzing a GitHub repo (returns job)
+  POST /api/analyze/step  — process ONE commit snapshot (client-stepped)
+  GET  /api/analyze/status — job progress
 
 All reads go through the read-only graph handle (ro_query only). When
 FalkorDB is unreachable the agent/query endpoints return an honest 503 —
 the agent answers nothing rather than inventing an answer.
 
-NOTE on POST /api/ingest: re-ingesting the same snapshots duplicates
-CREATE-based edges (edge opens are not idempotent — see
-timetrace.ingest.ingest.FalkorWriter), so the demo graph is ingested once.
-Nodes are safe (MERGE on id+valid_from); edges are not.
+Each analyzed repo lives in its OWN FalkorDB graph ("gh_{owner}__{repo}",
+sanitized); the rich demo graph "timetrace" is never touched. The `repo`
+parameter routes to the right graph server-side, so every endpoint works
+unchanged per repo.
+
+NOTE on POST /api/ingest: the ingest path is idempotent through
+FalkorWriter (MERGE on id+valid_from / uid; closes are no-ops when already
+closed — see timetrace.ingest.ingest), so re-running a chunk or a step is
+safe.
 """
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
@@ -27,6 +40,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from timetrace import agent as agent_mod
+from timetrace.analyze import github as gh_mod
+from timetrace.analyze import jobs as jobs_mod
 from timetrace.graph import queries as Q
 from timetrace.graph.db import (
     DatabaseUnavailableError,
@@ -34,6 +49,8 @@ from timetrace.graph.db import (
     require_db,
     ro_graph,
 )
+from timetrace.ingest.ingest import SnapshotPlanner
+from timetrace.parser import parse_files
 
 app = FastAPI(title="timetrace", version="0.1.0-eventweek")
 
@@ -62,11 +79,22 @@ class IngestOpsRequest(BaseModel):
     Exists so the graph can be built against a remote FalkorDB from
     environments with bounded request time (e.g. serverless): the planner
     is pure and runs wherever, and each POST executes one chunk of ops.
-    create_indexes=true on the first chunk only. Ops are NOT idempotent
-    for edge opens — run each chunk exactly once per fresh graph.
+    create_indexes=true on the first chunk only. Ops are idempotent
+    through FalkorWriter, so re-sending a chunk is safe.
     """
     ops: List[Dict[str, Any]]
     create_indexes: bool = False
+
+
+class AnalyzeStartRequest(BaseModel):
+    repo_url: str = Field(..., min_length=10,
+                          description="public GitHub repo URL, "
+                                      "e.g. https://github.com/tqdm/tqdm")
+
+
+class AnalyzeStepRequest(BaseModel):
+    repo: str = Field(..., min_length=3,
+                      description="analyzed repo name, e.g. 'tqdm/tqdm'")
 
 
 # ---------------------------------------------------------------------------
@@ -86,20 +114,27 @@ def _db_error(exc: DatabaseUnavailableError) -> JSONResponse:
                         content={"detail": detail})
 
 
-def _resolve_repo(repo: Optional[str]) -> Union[str, JSONResponse]:
-    """Explicit repo, else the single repo in the graph, else a 400."""
-    if repo:
-        return repo
+def _resolve_target(repo: Optional[str]
+                    ) -> Union[Tuple[str, str], JSONResponse]:
+    """(graph_name, repo_name) for a repo selector.
+
+    Omitted or "rich" -> the bundled demo (graph "timetrace"). Any other
+    repo routes through the registry of analyzed repos; unknown repos get
+    a 404 that points at /api/analyze/start.
+    """
+    if not repo or repo == jobs_mod.DEMO_REPO:
+        return jobs_mod.DEFAULT_GRAPH, jobs_mod.DEMO_REPO
     try:
-        found = Q.default_repo(ro_graph())
+        graph = jobs_mod.registry_lookup(repo)
     except DatabaseUnavailableError as exc:
         return _db_error(exc)
-    if not found:
+    if not graph:
         return JSONResponse(
-            status_code=400,
-            content={"detail": "no repository specified and the graph holds "
-                               "zero or several repositories; pass ?repo="})
-    return found
+            status_code=404,
+            content={"detail": f"unknown repo {repo!r} — analyze it first "
+                               "with POST /api/analyze/start "
+                               "{\"repo_url\": \"https://github.com/owner/repo\"}"})
+    return graph, repo
 
 
 def _parse_t(t: Optional[Union[int, str]]) -> Optional[int]:
@@ -123,6 +158,18 @@ def health() -> Dict[str, str]:
     return {"status": "ok", "service": "timetrace", "phase": "eventweek"}
 
 
+@app.get("/api/repos")
+def repos() -> JSONResponse:
+    """Every repo the UI can show: the bundled rich demo + analyzed repos."""
+    out = [{"repo": jobs_mod.DEMO_REPO, "graph": jobs_mod.DEFAULT_GRAPH,
+            "owner": "Textualize", "status": "ready"}]
+    try:
+        out.extend(jobs_mod.list_registered())
+    except DatabaseUnavailableError as exc:
+        return _db_error(exc)
+    return JSONResponse(status_code=200, content={"repos": out})
+
+
 @app.get("/api/stats")
 def stats(repo: Optional[str] = None) -> JSONResponse:
     """Repo/commit/node/edge counts + DB connectivity status.
@@ -130,34 +177,37 @@ def stats(repo: Optional[str] = None) -> JSONResponse:
     Returns 200 even when the DB is down, with connected=false — the UI
     uses this to render its status pill honestly.
     """
+    resolved = _resolve_target(repo)
+    if isinstance(resolved, JSONResponse):
+        return resolved
+    graph, repo_name = resolved
     try:
-        g = require_db()
+        g = jobs_mod.require_db_named(graph)
     except DatabaseUnavailableError as exc:
         return JSONResponse(status_code=200, content={
-            "connected": False, "error": str(exc), "repo": repo})
-    repo_name = repo or Q.default_repo(g)
+            "connected": False, "error": str(exc), "repo": repo_name,
+            "graph": graph})
     payload: Dict[str, Any] = {"connected": True,
                                "graph": g.config.graph,
                                "host": f"{g.config.host}:{g.config.port}"}
-    if repo_name:
-        payload.update(Q.repo_stats(g, repo_name))
-    else:
-        payload["repo"] = None
+    payload.update(Q.repo_stats(g, repo_name))
     return JSONResponse(status_code=200, content=payload)
 
 
 @app.get("/api/timeline")
 def timeline(repo: Optional[str] = None) -> JSONResponse:
     """Commit list for the timeline scrubber (ordered oldest -> newest)."""
-    resolved = _resolve_repo(repo)
+    resolved = _resolve_target(repo)
     if isinstance(resolved, JSONResponse):
         return resolved
+    graph, repo_name = resolved
     try:
-        entries = Q.timeline(ro_graph(), resolved)
+        entries = Q.timeline(jobs_mod.ro_graph_named(graph), repo_name)
     except DatabaseUnavailableError as exc:
         return _db_error(exc)
     return JSONResponse(status_code=200,
-                        content={"repo": resolved, "entries": entries})
+                        content={"repo": repo_name, "graph": graph,
+                                 "entries": entries})
 
 
 @app.get("/api/state")
@@ -166,15 +216,16 @@ def state(t: Optional[int] = None,
     """Time-slice at ?t=<epoch> (default now): open modules + functions."""
     import time as _time
 
-    resolved = _resolve_repo(repo)
+    resolved = _resolve_target(repo)
     if isinstance(resolved, JSONResponse):
         return resolved
+    graph, repo_name = resolved
     at = t if t is not None else int(_time.time())
     try:
-        g = ro_graph()
-        payload = {"repo": resolved, "t": at,
-                   "slice": Q.time_slice(g, resolved, at),
-                   "stats": Q.repo_stats(g, resolved)}
+        g = jobs_mod.ro_graph_named(graph)
+        payload = {"repo": repo_name, "graph": graph, "t": at,
+                   "slice": Q.time_slice(g, repo_name, at),
+                   "stats": Q.repo_stats(g, repo_name)}
     except DatabaseUnavailableError as exc:
         return _db_error(exc)
     return JSONResponse(status_code=200, content=payload)
@@ -184,9 +235,13 @@ def state(t: Optional[int] = None,
 def query(req: QueryRequest) -> JSONResponse:
     """The temporal agent: question (+ optional as-of time) -> verdict,
     summary, proof chain. Every fact comes from graph queries only."""
+    resolved = _resolve_target(req.repo)
+    if isinstance(resolved, JSONResponse):
+        return resolved
+    graph, repo_name = resolved
     try:
         result = agent_mod.answer(req.question, t=_parse_t(req.t),
-                                  repo=req.repo)
+                                  repo=repo_name, graph=graph)
     except DatabaseUnavailableError as exc:
         return _db_error(exc)
     except ValueError as exc:  # e.g. unresolvable target id shape
@@ -202,10 +257,9 @@ def ingest(req: IngestRequest) -> JSONResponse:
            "repo": "<name, default: dir name>"}.
     Returns planned op counts and written counts.
 
-    WARNING: re-ingesting the same snapshots duplicates CREATE-based
-    edges (MODIFIED/DEFINES/CALLS/... opens are plain CREATEs, not
-    idempotent). Ingest the demo graph once; for a re-run, point at a
-    fresh graph name via the FALKORDB_GRAPH env key.
+    Ingest ops are idempotent through FalkorWriter (MERGE on
+    id+valid_from / uid; closes are no-ops when already closed), so
+    re-running a chunk or the whole ingest is safe.
     """
     import json
     import os
@@ -311,6 +365,211 @@ def ingest_ops(req: IngestOpsRequest) -> JSONResponse:
     return JSONResponse(status_code=200, content={
         "graph": cfg.graph, "ops_received": len(req.ops),
         "written": written})
+
+
+# ---------------------------------------------------------------------------
+# analyze: any public GitHub repo -> temporal graph (client-stepped)
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/analyze/start")
+def analyze_start(req: AnalyzeStartRequest) -> JSONResponse:
+    """Begin analyzing a public GitHub repo.
+
+    Lists commits (paginated), samples up to 40 spread across the listed
+    history, checks the oldest sampled commit has Python files, then
+    creates the repo's own graph + AnalyzeJob + registry row. The UI then
+    calls POST /api/analyze/step once per commit until the job is done.
+
+    Honest caps (also in timetrace/analyze/github.py): commit listing
+    covers the newest 800 commits; repos over 60 MB are refused; Python
+    only (parser is Python-only); unauthenticated GitHub rate limit
+    (60 req/hour) applies.
+    """
+    try:
+        owner, repo = gh_mod.parse_repo_url(req.repo_url)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"detail": str(exc)})
+    repo_name = jobs_mod.repo_name_for(owner, repo)
+
+    existing = None
+    try:
+        graph = jobs_mod.registry_lookup(repo_name)
+        if graph:
+            existing = jobs_mod.load_job(repo_name, graph)
+    except DatabaseUnavailableError as exc:
+        return _db_error(exc)
+    if existing and existing.get("status") == "done":
+        return JSONResponse(status_code=200, content={
+            "repo": repo_name, "owner": owner,
+            "graph": existing["graph"], "total": existing["total"],
+            "done": existing["total"], "status": "done",
+            "note": "already analyzed"})
+    if existing:  # interrupted job: resume where it left off
+        pending = json_loads(existing["pending"])
+        return JSONResponse(status_code=200, content={
+            "repo": repo_name, "owner": owner, "graph": existing["graph"],
+            "total": existing["total"], "done": existing["done"],
+            "status": "running", "note": "resumed"})
+
+    try:
+        info = gh_mod.repo_info(owner, repo)
+    except gh_mod.RepoNotFoundError:
+        return JSONResponse(status_code=404, content={
+            "detail": f"repo not found on GitHub: {owner}/{repo}"})
+    except gh_mod.GitHubError as exc:
+        return JSONResponse(status_code=502, content={"detail": str(exc)})
+    if info["private"]:
+        return JSONResponse(status_code=400, content={
+            "detail": "private repos are not supported — paste a public "
+                      "GitHub repo URL"})
+    if info["size_kb"] > gh_mod.SIZE_CAP_KB:
+        return JSONResponse(status_code=400, content={
+            "detail": f"repo is {info['size_kb'] // 1024} MB; the serverless "
+                      f"analyze flow caps at {gh_mod.SIZE_CAP_KB // 1024} MB"})
+
+    try:
+        commits = gh_mod.list_commits(owner, repo)
+    except gh_mod.GitHubError as exc:
+        return JSONResponse(status_code=502, content={"detail": str(exc)})
+    if not commits:
+        return JSONResponse(status_code=400, content={
+            "detail": f"no commits found for {owner}/{repo}"})
+    sampled = gh_mod.sample_commits(commits, gh_mod.SAMPLE_N)
+
+    # Python check on the OLDEST sampled commit (fail fast, clear message).
+    try:
+        probe = gh_mod.fetch_py_files(owner, repo, sampled[0]["sha"])
+    except gh_mod.GitHubError as exc:
+        return JSONResponse(status_code=502, content={"detail": str(exc)})
+    if len(probe) < gh_mod.MIN_PY_FILES:
+        return JSONResponse(status_code=400, content={
+            "detail": f"only {len(probe)} Python files at the oldest sampled "
+                      "commit — timetrace's parser is Python-only, so this "
+                      "repo cannot be analyzed"})
+
+    graph = jobs_mod.graph_name_for(owner, repo)
+    try:
+        jobs_mod.create_job(owner, repo_name, graph, sampled)
+        jobs_mod.register_repo(owner, repo_name, graph,
+                               status=f"0/{len(sampled)}")
+    except Exception as exc:  # noqa: BLE001 - surfaced as 502 detail
+        return JSONResponse(status_code=502, content={
+            "detail": f"could not create analyze job: {exc}"})
+    return JSONResponse(status_code=200, content={
+        "repo": repo_name, "owner": owner, "graph": graph,
+        "total": len(sampled), "done": 0, "status": "running",
+        "note": f"sampled {len(sampled)} commits across the listed history"})
+
+
+@app.post("/api/analyze/step")
+def analyze_step(req: AnalyzeStepRequest) -> JSONResponse:
+    """Process ONE commit snapshot for an analyze job.
+
+    Fetch the commit tarball, parse the Python files, plan ops against
+    planner state reconstructed from the graph, write them, advance the
+    job. Idempotent ops make a retried step safe.
+    """
+    repo_name = req.repo
+    try:
+        graph = jobs_mod.registry_lookup(repo_name)
+    except DatabaseUnavailableError as exc:
+        return _db_error(exc)
+    if not graph:
+        return JSONResponse(status_code=404, content={
+            "detail": f"unknown repo {repo_name!r} — start with "
+                      "POST /api/analyze/start"})
+    job = jobs_mod.load_job(repo_name, graph)
+    if job is None:
+        return JSONResponse(status_code=404, content={
+            "detail": f"no analyze job for {repo_name!r}"})
+    if job["status"] == "done":
+        return JSONResponse(status_code=200, content={
+            "repo": repo_name, "done": job["total"], "total": job["total"],
+            "status": "done"})
+    pending = json_loads(job["pending"])
+    if not pending:  # belt-and-braces: job drained without being marked
+        jobs_mod.save_job(repo_name, graph, [], job["total"], "done")
+        jobs_mod.set_registry_status(repo_name, "ready")
+        return JSONResponse(status_code=200, content={
+            "repo": repo_name, "done": job["total"], "total": job["total"],
+            "status": "done"})
+
+    entry = pending[0]
+    owner = job["owner"]
+    gh_repo = repo_name.split("/", 1)[1]
+    try:
+        files = gh_mod.fetch_py_files(owner, gh_repo, entry["sha"])
+    except gh_mod.GitHubError as exc:
+        return JSONResponse(status_code=502, content={"detail": str(exc)})
+    try:
+        ir = parse_files(files)
+    except Exception as exc:  # noqa: BLE001 - parser is pure; be honest
+        return JSONResponse(status_code=502, content={
+            "detail": f"parser failed on commit {entry['sha'][:7]}: {exc}"})
+
+    snapshot = {
+        "commit": entry["sha"],
+        "author": f"{entry['name']} <{entry['email']}>",
+        "timestamp": entry["date_iso"],
+        "nodes": ir["nodes"],
+        "edges": ir["edges"],
+    }
+    try:
+        g = jobs_mod.ro_graph_named(graph)
+        open_nodes, open_edges = jobs_mod.reconstruct_planner_state(
+            g, repo_name)
+        planner = SnapshotPlanner(repo_name, open_nodes, open_edges,
+                                  emit_repo_open=False)
+        ops = planner.add_snapshot(snapshot)
+        written = jobs_mod.writer_named(graph).write_ops(ops)
+    except DatabaseUnavailableError as exc:
+        return _db_error(exc)
+    except Exception as exc:  # noqa: BLE001 - surfaced as 502 detail
+        return JSONResponse(status_code=502, content={
+            "detail": f"step failed on commit {entry['sha'][:7]}: {exc}"})
+
+    done = job["done"] + 1
+    rest = pending[1:]
+    status = "done" if not rest else "running"
+    jobs_mod.save_job(repo_name, graph, rest, done, status)
+    jobs_mod.set_registry_status(
+        repo_name, "ready" if status == "done" else f"{done}/{job['total']}")
+    return JSONResponse(status_code=200, content={
+        "repo": repo_name, "done": done, "total": job["total"],
+        "status": status, "ops_written": written})
+
+
+@app.get("/api/analyze/status")
+def analyze_status(repo: str) -> JSONResponse:
+    """Job progress for one repo: {repo, done, total, status}."""
+    try:
+        graph = jobs_mod.registry_lookup(repo)
+    except DatabaseUnavailableError as exc:
+        return _db_error(exc)
+    if not graph:
+        return JSONResponse(status_code=404, content={
+            "detail": f"unknown repo {repo!r}"})
+    job = jobs_mod.load_job(repo, graph)
+    if job is None:
+        return JSONResponse(status_code=404, content={
+            "detail": f"no analyze job for {repo!r}"})
+    return JSONResponse(status_code=200, content={
+        "repo": repo, "graph": graph, "done": job["done"],
+        "total": job["total"], "status": job["status"]})
+
+
+def json_loads(text: Optional[str]) -> List[Dict[str, Any]]:
+    """Pending-commit JSON with a sane default."""
+    import json as _json
+
+    if not text:
+        return []
+    try:
+        val = _json.loads(text)
+    except (ValueError, TypeError):
+        return []
+    return val if isinstance(val, list) else []
 
 
 # UI shell, served last so API routes win. Path resolved from this module's

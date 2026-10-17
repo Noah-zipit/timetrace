@@ -156,25 +156,35 @@ def _edge_key(kind: str, frm: str, to: str, callee: str = "") -> tuple:
     return (kind, frm, to or "")
 
 
-def plan_ingest(repo: str, snapshots: list[dict]) -> list[dict]:
-    """Turn chronological snapshots into a DB-ready op list.
+class SnapshotPlanner:
+    """Stateful per-snapshot ingest planner.
 
-    Each snapshot: {"commit", "author", "timestamp" (ISO), "nodes", "edges"}
-    where nodes/edges are the parser IR dicts.
-
-    Ops (all DB-agnostic dicts):
-      repo_open      {"repo"}
-      node_open      {"label","id","valid_from","props"}
-      node_close     {"label","id","valid_from","ts"}
-      edge_open      {"kind","from_id","from_vf","to_id","to_vf",
-                      "valid_from","props"}   (props carry uid)
-      edge_close     {"uid","ts"}
+    ``plan_ingest`` is this class driven over a snapshot series;
+    the analyze API drives one ``add_snapshot`` per serverless step,
+    reconstructing ``open_nodes``/``open_edges`` from the graph
+    between steps. All emitted ops are idempotent through
+    ``FalkorWriter`` (MERGE on id+valid_from / uid; closes are
+    no-ops when already closed), so a retried step is safe.
     """
-    ops: list[dict] = [{"op": "repo_open", "repo": repo}]
-    open_nodes: dict[str, dict] = {}  # id -> {valid_from, hash, label}
-    open_edges: dict[tuple, dict] = {}  # edge_key -> {uid, valid_from, ...}
 
-    for snap in snapshots:
+    def __init__(self, repo: str,
+                 open_nodes: dict | None = None,
+                 open_edges: dict | None = None,
+                 emit_repo_open: bool = True) -> None:
+        self.repo = repo
+        self.open_nodes: dict = open_nodes if open_nodes is not None else {}
+        self.open_edges: dict = open_edges if open_edges is not None else {}
+        self.init_ops: list[dict] = ([{"op": "repo_open", "repo": repo}]
+                                     if emit_repo_open else [])
+
+    def add_snapshot(self, snap: dict) -> list[dict]:
+        """Plan ops for one chronological snapshot, updating the
+        in-memory registries. ``snap``: {"commit", "author",
+        "timestamp" (ISO), "nodes", "edges"} (parser IR)."""
+        repo = self.repo
+        open_nodes = self.open_nodes
+        open_edges = self.open_edges
+        ops: list[dict] = []
         meta = snap.get("snapshot", snap)  # sampler nests meta under "snapshot"
         ts = epoch_seconds(meta["timestamp"])
         sha = meta["commit"]
@@ -373,6 +383,9 @@ def plan_ingest(repo: str, snapshots: list[dict]) -> list[dict]:
                 "module": n.get("module", ""),
                 "lineno": n.get("lineno"),
                 "valid_to": None,
+                # stored so a later step can reconstruct the planner's
+                # open_nodes registry (hash comparison) from the graph
+                "body_hash": body_hash(n),
             }
             if label == "Function":
                 props.update({
@@ -517,6 +530,27 @@ def plan_ingest(repo: str, snapshots: list[dict]) -> list[dict]:
                                    "from_vf": new_from_vf,
                                    "to_vf": new_to_vf}
 
+        return ops
+
+
+def plan_ingest(repo: str, snapshots: list[dict]) -> list[dict]:
+    """Turn chronological snapshots into a DB-ready op list.
+
+    Each snapshot: {"commit", "author", "timestamp" (ISO), "nodes", "edges"}
+    where nodes/edges are the parser IR dicts.
+
+    Ops (all DB-agnostic dicts):
+      repo_open      {"repo"}
+      node_open      {"label","id","valid_from","props"}
+      node_close     {"label","id","valid_from","ts"}
+      edge_open      {"kind","from_id","from_vf","to_id","to_vf",
+                      "valid_from","props"}   (props carry uid)
+      edge_close     {"uid","ts"}
+    """
+    planner = SnapshotPlanner(repo)
+    ops: list[dict] = list(planner.init_ops)
+    for snap in snapshots:
+        ops.extend(planner.add_snapshot(snap))
     return ops
 
 
