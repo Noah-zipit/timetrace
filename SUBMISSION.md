@@ -30,9 +30,14 @@ the exact commit and query behind it. Drag the timeline scrubber back to any
 commit and the same question gets a different answer, because the code, its
 dependents, and its owners were different then.
 
-Demo: Textualize/rich — 61 sampled commits (Nov 2019 → Apr 2026), 420 modules,
-318 classes, 2,576 functions, ~30,000 temporal edges, all queryable as-of any
-timestamp.
+Paste **any public GitHub repo URL** and timetrace builds the same temporal
+graph for it — the live demo analyzes a repo on demand (up to 40 sampled
+commits, one commit per serverless step with real progress, each repo in
+its own FalkorDB graph). Bundled demo: Textualize/rich — 61 sampled commits
+(Nov 2019 → Apr 2026), 420 modules, 318 classes, 2,576 functions, ~30,000
+temporal edges, all queryable as-of any timestamp. A second repo
+(tqdm/tqdm, 40 commits) was analyzed end-to-end on the live site during
+event week as the generalization proof.
 
 FalkorDB is load-bearing, not decorative: it is the only data store. Remove
 it and the product dies — the agent queries the graph read-only and returns
@@ -68,7 +73,8 @@ FastAPI skeleton, UI shell. Deliberately zero FalkorDB code.
 schema, snapshot→interval planner with rename detection, batched FalkorDB
 writer, temporal Cypher query library, the proof-chain agent, real UI wiring
 with timeline scrubber, the full rich demo ingest, screenshots, and the demo
-video.
+video — plus the generalization to any public GitHub repo (GitHub-API-based
+analyze pipeline, per-repo graphs, repo switcher UI, client-stepped ingest).
 
 ## AI-assistance disclosure
 
@@ -87,4 +93,9 @@ on the deployed site: `/api/stats` (connected:true), `/api/timeline` (61
 commits), and `POST /api/query` for "Is it safe to change rich/console.py?"
 returns verdict **RISKY** with a 4-claim proof chain. The full interactive
 demo (UI + timeline scrubber + verdicts with proof chains) runs against the
-live cloud graph — the demo video below shows the same product.
+live cloud graph — the demo video below shows the same product. Since
+2026-10-17 ~18:00 the app also analyzes any pasted GitHub repo on demand
+(verified live: tqdm/tqdm, 40/40 commits, queried with a proof chain);
+honest caps — 40 sampled commits per repo across the newest 800, repos
+over 60 MB refused, Python files only, GitHub's 60-requests/hour
+unauthenticated limit applies.

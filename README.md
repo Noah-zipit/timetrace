@@ -1,12 +1,12 @@
 # timetrace — a time machine for code
 
-**One-liner:** timetrace reads a repository's git history, stores it as a
-*temporal graph* in FalkorDB, and answers **"is it safe to change this module
-today?"** with a verdict backed by a proof chain you can inspect. Drag the
-timeline back to any commit and the answer changes — because the code, its
-dependencies, and its owners were different then.
+**One-liner:** paste **any public GitHub repo URL** and timetrace builds a
+temporal graph of its history in FalkorDB, then answers **"is it safe to
+change this module today?"** with a verdict backed by a proof chain you can
+inspect. Drag the timeline back to any commit and the answer changes —
+because the code, its dependencies, and its owners were different then.
 
-Demo repo: **Textualize/rich** — 61 sampled commits (Nov 2019 → Apr 2026),
+Bundled demo: **Textualize/rich** — 61 sampled commits (Nov 2019 → Apr 2026),
 420 modules, 318 classes, 2,576 functions, ~30,000 temporal edges.
 
 ## How it works (plain language)
@@ -38,9 +38,20 @@ unreachable the API returns an honest 503 instead of a fake answer.
 ![Verdict with proof chain](ui/qa/02-verdict-now.png)
 ![Same question, asked in 2020 — different verdict](ui/qa/03-verdict-scrubbed.png)
 
-## Live demo
+## Live demo — paste any GitHub repo
 
 **https://timetrace-demo.vercel.app** — the app, live.
+
+Paste any public GitHub repo URL into the repo bar and timetrace analyzes
+it: commits are listed via the GitHub API (no git binary needed), up to 40
+are sampled across the listed history, each commit's tarball is parsed for
+Python files, and the temporal graph is built one commit per serverless
+step — the UI shows real progress (n/40). Every repo gets its own FalkorDB
+graph (`gh_{owner}__{repo}`); the bundled rich demo stays untouched, and
+the repo switcher flips between them. Honest caps: sampling covers the
+repo's newest 800 commits, repos over 60 MB are refused, Python files only
+(the parser is Python-only), and the unauthenticated GitHub rate limit
+(60 requests/hour) applies.
 
 Status 2026-10-17: **fully live and verified.** The FalkorDB Cloud instance
 was restored, and all 20,257 pre-planned ingest ops in 14 chunks (under
@@ -117,6 +128,10 @@ against a live local FalkorDB).
 | GET    | `/api/state?t=` | modules + functions open at epoch `t`                 |
 | POST   | `/api/query`    | `{"question": "..."}` → verdict + proof chain         |
 | POST   | `/api/ingest`   | run the pipeline for a snapshot directory            |
+| GET    | `/api/repos`    | analyzed repos (rich demo + user-analyzed)            |
+| POST   | `/api/analyze/start` | `{"repo_url": "https://github.com/o/r"}` → analyze job |
+| POST   | `/api/analyze/step`  | `{"repo": "o/r"}` → process ONE commit (repeat to 40) |
+| GET    | `/api/analyze/status?repo=o/r` | job progress                       |
 
 ## Project layout
 
