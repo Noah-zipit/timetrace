@@ -77,7 +77,9 @@ class IngestOpsRequest(BaseModel):
 def _db_error(exc: DatabaseUnavailableError) -> JSONResponse:
     detail = str(exc)
     cause = exc.__cause__
-    if cause is not None and "falkordb" not in str(exc).lower():
+    if cause is not None:
+        # Underlying driver errors never carry the password; surfacing the
+        # class + first 200 chars is what makes remote debugging possible.
         detail += (f" (cause: {type(cause).__name__}: "
                    f"{str(cause)[:200]})")
     return JSONResponse(status_code=exc.status_code,
