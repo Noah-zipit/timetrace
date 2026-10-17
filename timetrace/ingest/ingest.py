@@ -559,7 +559,7 @@ UNWIND $rows AS row
 MATCH (a {id: row.from_id}), (b {id: row.to_id})
 WHERE (row.from_vf IS NULL OR a.valid_from = row.from_vf)
   AND (row.to_vf IS NULL OR b.valid_from = row.to_vf)
-CREATE (a)-[e:%(kind)s]->(b)
+MERGE (a)-[e:%(kind)s {uid: row.props.uid}]->(b)
 SET e = row.props"""
 
 _EDGE_CLOSE = """\
