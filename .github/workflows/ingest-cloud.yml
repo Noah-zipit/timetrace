@@ -1,0 +1,77 @@
+# Ingest the demo graph into FalkorDB Cloud (one-shot, one graph).
+#
+# Run manually from the Actions tab ("Run workflow") or:
+#   gh workflow run ingest-cloud.yml --repo Noah-zipit/timetrace
+#
+# This is the only place the demo data gets into the cloud instance —
+# the build VM cannot reach database ports, so ingest happens on a
+# GitHub runner instead. Secrets needed: FALKORDB_HOST, FALKORDB_PORT,
+# FALKORDB_USERNAME, FALKORDB_PASSWORD.
+#
+# WARNING: edges are not idempotent (see timetrace/api/main.py /api/ingest
+# docs). Run this once per fresh cloud instance; if the cloud instance is
+# reset, a re-run is fine.
+
+name: ingest-demo-cloud
+
+on:
+  workflow_dispatch:
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      FALKORDB_HOST: ${{ secrets.FALKORDB_HOST }}
+      FALKORDB_PORT: ${{ secrets.FALKORDB_PORT }}
+      FALKORDB_USERNAME: ${{ secrets.FALKORDB_USERNAME }}
+      FALKORDB_PASSWORD: ${{ secrets.FALKORDB_PASSWORD }}
+    steps:
+      - name: checkout timetrace
+        uses: actions/checkout@v4
+
+      - name: setup python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: install deps
+        run: pip install -r requirements.txt
+
+      - name: clone rich (full history)
+        run: git clone https://github.com/Textualize/rich.git
+
+      - name: sample git history (same as verified local demo)
+        run: python -m timetrace.sampler.cli rich --mode every --n 74 --out demo-data/repo-snapshots
+
+      - name: ingest into FalkorDB Cloud
+        run: |
+          python -m timetrace.ingest.cli demo-data/repo-snapshots \
+            --repo rich --graph timetrace \
+            --host "$FALKORDB_HOST" --port "$FALKORDB_PORT" \
+            --user "$FALKORDB_USERNAME" --password "$FALKORDB_PASSWORD"
+
+      - name: verify graph counts
+        run: |
+          python - <<'PYEOF'
+          from falkordb import FalkorDB
+          import os
+          db = FalkorDB(host=os.environ["FALKORDB_HOST"],
+                        port=int(os.environ["FALKORDB_PORT"]),
+                        username=os.environ["FALKORDB_USERNAME"],
+                        password=os.environ["FALKORDB_PASSWORD"])
+          g = db.select_graph("timetrace")
+          for q in [
+              "MATCH (m:Module) RETURN count(m) AS n",
+              "MATCH (c:Class) RETURN count(c) AS n",
+              "MATCH (f:Function) RETURN count(f) AS n",
+              "MATCH (c:Commit) RETURN count(c) AS n",
+              "MATCH ()-[r]->() RETURN count(r) AS n",
+          ]:
+              print(q.split("RETURN")[0].strip(), "->", g.query(q).result_set[0][0])
+          # sanity: the known demo verdict target exists now
+          rows = g.ro_query(
+              "MATCH (m:Module) WHERE m.id CONTAINS 'console.py' RETURN m.id LIMIT 3"
+          ).result_set
+          print("console.py matches:", rows)
+          PYEOF
