@@ -114,9 +114,13 @@ dropped connection; edge opens are MERGE-keyed by stable uid since commit
 
 ## Demo video
 
-[`ui/qa/timetrace-demo.mp4`](ui/qa/timetrace-demo.mp4) — silent walkthrough with
-captions: the app answers a real question on the real demo graph, then the
-timeline is scrubbed back to 2020 and the verdict changes.
+[![Watch the timetrace demo](https://img.youtube.com/vi/E37Jmq9U4QY/hqdefault.jpg)](https://www.youtube.com/watch?v=E37Jmq9U4QY)
+
+**Watch:** https://www.youtube.com/watch?v=E37Jmq9U4QY — narrated walkthrough
+with captions: the app answers a real question on the real demo graph, then
+the timeline is scrubbed back to 2020 and the verdict changes. The recording
+also lives in this repo at `ui/qa/timetrace-demo-narrated.mp4` (original
+silent cut: `ui/qa/timetrace-demo.mp4`).
 
 ## Local setup (complete, from clone to running)
 
