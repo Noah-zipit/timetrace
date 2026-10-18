@@ -32,6 +32,51 @@ other database, no cache, no fallback. The agent's only data source is Cypher
 against the temporal graph (`timetrace/graph/queries.py`); with the database
 unreachable the API returns an honest 503 instead of a fake answer.
 
+## Graph map
+
+Every node and every edge carries `valid_from` / `valid_to` timestamps. A
+fact is true at time T when `valid_from <= T < valid_to` (`valid_to = null`
+means still true). Nothing is ever deleted — when code changes, the old
+window closes and a new one opens.
+
+```mermaid
+graph LR
+    R[Repository] -->|IN_REPO| M[Module]
+    M -->|DEFINES| C[Class]
+    M -->|DEFINES| F[Function]
+    C -->|DEFINES| F
+    F -->|CALLS| F
+    M -->|IMPORTS| M
+    P[Person] -->|AUTHORED| M
+    P -->|MODIFIED| F
+    F -->|RENAMED_TO| F
+```
+
+**Nodes:** `Repository` (one per analyzed repo) · `Module` (one Python file)
+· `Class` · `Function` — each with a deterministic id
+(`module:server.py`, `class:server.py:Server`) and its time window ·
+`Person` (commit authors).
+
+**Edges:** `DEFINES` (module → class/function, class → method) · `CALLS`
+(function → function) · `IMPORTS` (module → module) · `AUTHORED`
+(person → commit) · `MODIFIED` (person → node, via a commit) · `RENAMED_TO`
+(old version → new version, so a rename reads as one story).
+
+**How the agent queries it** — every question becomes a time-windowed
+traversal. Example, "which modules imported `rich/console.py` at time T"
+(from `timetrace/graph/queries.py`):
+
+```cypher
+MATCH (imp:Module)-[im:IMPORTS]->(m:Module)
+WHERE m.name = 'rich/console.py'
+  AND im.valid_from <= $t AND (im.valid_to IS NULL OR $t < im.valid_to)
+RETURN imp.name
+```
+
+The verdict's proof chain is built the same way — dependents, churn, and
+ownership are all multi-hop temporal traversals, and each claim cites the
+commit and the query behind it. Full model: `docs/data-model.md`.
+
 ## Screenshots
 
 ![Fresh load — timeline and module list](ui/qa/01-fresh-load.png)
