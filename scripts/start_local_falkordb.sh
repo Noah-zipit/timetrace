@@ -6,7 +6,7 @@
 #
 # Production is a pure .env swap: FALKORDB_HOST/FALKORDB_PORT/FALKORDB_USER/
 # FALKORDB_PASSWORD point at the cloud instance instead (never commit them).
-set -u
+set -euo pipefail
 
 HOST=127.0.0.1
 PORT=6380
